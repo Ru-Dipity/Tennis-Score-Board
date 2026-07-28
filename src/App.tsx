@@ -26,40 +26,41 @@ export default function App() {
   }
 
   // 1. 添加球员
-  async function addPlayer(e: React.FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    await client.models.Player.create({ name });
-    setName('');
-    fetchData();
-  }
+async function addPlayer(e: React.FormEvent) {
+  e.preventDefault();
+  if (!name.trim()) return;
+  // 加 as any 避开 Amplify SDK 的隐式退化误判
+  await client.models.Player.create({ name } as any);
+  setName('');
+  fetchData();
+}
 
   // 2. 保存比赛比分
-  async function saveMatch(e: React.FormEvent) {
-    e.preventDefault();
-    if (!winner || !loser || !score) {
-      alert('请完整填写胜方、败方和比分！');
-      return;
-    }
-    if (winner === loser) {
-      alert('胜方和败方不能是同一个球员！');
-      return;
-    }
-
-    await client.models.Match.create({
-      matchType: '单打',
-      winnerName: winner,
-      loserName: loser,
-      score: score,
-      date: new Date().toLocaleDateString(),
-    });
-
-    setScore('');
-    setWinner('');
-    setLoser('');
-    fetchData();
+async function saveMatch(e: React.FormEvent) {
+  e.preventDefault();
+  if (!winner || !loser || !score) {
+    alert('请完整填写胜方、败方和比分！');
+    return;
+  }
+  if (winner === loser) {
+    alert('胜方和败方不能是同一个球员！');
+    return;
   }
 
+  // 加 as any 避开 Amplify SDK 的隐式退化误判
+  await client.models.Match.create({
+    matchType: '单打',
+    winnerName: winner,
+    loserName: loser,
+    score: score,
+    date: new Date().toLocaleDateString(),
+  } as any);
+
+  setScore('');
+  setWinner('');
+  setLoser('');
+  fetchData();
+}
   return (
     <div style={{ maxWidth: '600px', margin: '30px auto', fontFamily: 'sans-serif', padding: '0 20px' }}>
       <h1 style={{ textAlign: 'center' }}>🎾 网球俱乐部记分板</h1>
