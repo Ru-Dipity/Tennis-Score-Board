@@ -12,9 +12,13 @@
   padding: 32px;
   border-radius: 24px;
   background:
-    radial-gradient(circle at top right, rgba(69, 214, 156, 0.2), transparent 35%),
-    linear-gradient(135deg, #0f172a, #16213b 50%, #11342b);
+    linear-gradient(180deg, rgba(15, 23, 42, 0.55) 0%, rgba(15, 23, 42, 0.82) 100%),
+    url('/images/tennis%20score%20board%20bg.jpg');
+  background-size: cover;
+  background-position: center;
   color: #f8fafc;
+  position: relative;
+  overflow: hidden;
 }
 
 .eyebrow,
@@ -48,6 +52,18 @@
   color: rgba(248, 250, 252, 0.85);
 }
 
+.hero-banner h1 {
+  font-size: 2.2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  margin-bottom: 8px;
+}
+
+.hero-banner .eyebrow {
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+}
+
 .hero-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -57,21 +73,26 @@
 
 .stat-card {
   padding: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 18px;
-  background: rgba(15, 23, 42, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
 }
 
 .stat-card span {
   display: block;
   font-size: 13px;
   color: rgba(248, 250, 252, 0.75);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
 .stat-card strong {
   display: block;
   margin-top: 10px;
   font-size: 32px;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .section-card {
@@ -604,33 +625,45 @@ thead th {
 
 .team-summary-card {
   display: grid;
-  gap: 8px;
-  padding: 14px 16px;
+  gap: 6px;
+  padding: 10px 14px;
   border: 1px solid #dbe6df;
-  border-radius: 14px;
+  border-radius: 10px;
   background: #ffffff;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
 }
 
 .team-summary-winner {
-  border-color: rgba(22, 163, 74, 0.45);
-  background: linear-gradient(135deg, rgba(220, 252, 231, 0.9), #ffffff);
+  border-color: rgba(22, 163, 74, 0.5);
+  background: linear-gradient(135deg, rgba(220, 252, 231, 0.92), #ffffff);
+}
+
+.team-summary-card h4 {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
 }
 
 .team-summary-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 14px;
-  color: #334155;
-  font-size: 13px;
+  gap: 4px 10px;
+  color: #475569;
+  font-size: 12px;
 }
 
 .team-summary-stats span {
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .team-summary-stats strong {
+  font-size: 1.25rem;
+  font-weight: 800;
   color: #0f172a;
+  line-height: 1;
 }
 
 /* ── Team Battle Duel Cards ── */
@@ -642,9 +675,9 @@ thead th {
 
 .team-duel-card {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 14px;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
   border: 1px solid #dbe6df;
   background: #f8fbf9;
 }
@@ -660,17 +693,17 @@ thead th {
 .team-submatch-card {
   display: grid;
   gap: 6px;
-  padding: 8px 10px;
-  border-radius: 12px;
+  padding: 6px 8px;
+  border-radius: 10px;
   border: 1px solid #d8e4db;
   background: #ffffff;
-  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.03);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.03);
 }
 
 .team-submatch-body {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  gap: 8px;
+  gap: 6px;
   align-items: stretch;
 }
 
@@ -678,10 +711,10 @@ thead th {
 
 .team-submatch-side {
   display: grid;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
-  padding: 8px 10px;
-  border-radius: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
   border: 1px solid #e4ece7;
   background: #fafdfb;
 }
@@ -695,8 +728,8 @@ thead th {
 }
 
 .team-submatch-side-winner {
-  border-color: rgba(22, 163, 74, 0.38);
-  background: linear-gradient(135deg, rgba(220, 252, 231, 0.82), #ffffff);
+  border-color: rgba(22, 163, 74, 0.4);
+  background: linear-gradient(135deg, rgba(220, 252, 231, 0.85), #ffffff);
 }
 
 .team-submatch-team-label {
@@ -710,20 +743,20 @@ thead th {
 
 .team-submatch-player-block {
   display: grid;
-  gap: 2px;
+  gap: 1px;
 }
 
 .team-submatch-player-name {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
-  line-height: 1.4;
+  line-height: 1.35;
   color: #0f172a;
   overflow-wrap: anywhere;
 }
 
 /* Doubles: two player names stacked tightly */
 .team-submatch-player-name + .team-submatch-player-name {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: #334155;
 }
@@ -740,12 +773,13 @@ thead th {
   gap: 4px;
   align-content: center;
   justify-items: center;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid #dbe6df;
-  background: linear-gradient(180deg, #ffffff, #f8fbf9);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #d0dfd6;
+  background: linear-gradient(180deg, #ffffff, #f4f9f6);
   text-align: center;
-  min-width: 100px;
+  min-width: 90px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
 }
 
 .team-submatch-format {
@@ -758,7 +792,7 @@ thead th {
 }
 
 .team-submatch-score {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 800;
   line-height: 1.3;
   color: #0f172a;
@@ -766,8 +800,9 @@ thead th {
 }
 
 .team-submatch-scoreboard .status-pill {
-  padding: 3px 8px;
+  padding: 3px 10px;
   font-size: 10px;
+  font-weight: 700;
 }
 
 .team-lineup-editor {
@@ -1043,11 +1078,11 @@ thead th {
   }
 
   .team-submatch-player-name {
-    font-size: 12px;
+    font-size: 14px;
   }
 
   .team-submatch-player-name + .team-submatch-player-name {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   /* ── Scoreboard: horizontal row on mobile ── */
@@ -1068,12 +1103,12 @@ thead th {
   }
 
   .team-submatch-score {
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .team-submatch-scoreboard .status-pill {
-    padding: 2px 6px;
-    font-size: 9px;
+    padding: 2px 8px;
+    font-size: 10px;
   }
 
   /* ── Touch-friendly buttons ── */
@@ -1136,11 +1171,11 @@ thead th {
   }
 
   .team-submatch-player-name {
-    font-size: 11px;
+    font-size: 13px;
   }
 
   .team-submatch-player-name + .team-submatch-player-name {
-    font-size: 10px;
+    font-size: 11px;
   }
 
   .team-submatch-scoreboard {
@@ -1149,7 +1184,7 @@ thead th {
   }
 
   .team-submatch-score {
-    font-size: 12px;
+    font-size: 13px;
   }
 
   .team-submatch-format {
@@ -1157,8 +1192,8 @@ thead th {
   }
 
   .team-submatch-scoreboard .status-pill {
-    font-size: 8px;
-    padding: 1px 5px;
+    font-size: 9px;
+    padding: 1px 6px;
   }
 
   .team-submatch-scoreboard button,
