@@ -1139,6 +1139,60 @@ function App() {
     );
   }
 
+  function renderTeamBattleSide(match: Match, side: WinnerSide) {
+    const isWinner = isSideWinner(match, side);
+    const participantName = side === 'A' ? match.participantAName : match.participantBName;
+    const teamLabel = side === 'A' ? match.participantATeamLabel : match.participantBTeamLabel;
+    const scores = getScoreList(match, side);
+
+    return (
+      <div
+        className={`team-submatch-side team-submatch-side-${side.toLowerCase()} ${isWinner ? 'team-submatch-side-winner' : ''}`}
+      >
+        <span className="team-submatch-team-label">{teamLabel || 'Team TBD'}</span>
+        <div className="team-submatch-player-block">
+          <span className="team-submatch-player-name">{participantName || 'TBD'}</span>
+          <div className="participant-badges">
+            {isWinner ? <span className="inline-badge winner-badge">✓ Winner</span> : null}
+          </div>
+        </div>
+        <div className="set-score-strip">
+          {scores.length ? (
+            scores.map((score: number, index: number) => (
+              <span className="set-score-cell" key={`${match.id}-${side}-team-${index}`}>
+                {score}
+              </span>
+            ))
+          ) : (
+            <span className="set-score-placeholder">—</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderTeamBattleMatchCard(match: Match) {
+    return (
+      <div className="team-submatch-card" key={match.id}>
+        <div className="team-submatch-head">
+          <strong>{match.matchCategory === 'TEAM_DOUBLES' ? 'Doubles' : 'Singles'}</strong>
+          <span>{match.groupName}</span>
+        </div>
+        <div className="team-submatch-body">
+          {renderTeamBattleSide(match, 'A')}
+          <div className="team-submatch-scoreboard">
+            <span className="team-submatch-format">{getMatchFormatLabel(match.matchFormat)}</span>
+            <strong className="team-submatch-score">{getMatchDisplayScore(match)}</strong>
+            <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
+              {match.status === 'COMPLETED' ? 'Completed' : match.status === 'IN_PROGRESS' ? 'In Progress' : 'Pending'}
+            </span>
+          </div>
+          {renderTeamBattleSide(match, 'B')}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="hero-banner">
@@ -1338,21 +1392,7 @@ function App() {
                             </div>
 
                             <div className="team-submatch-list">
-                              {duel.matches.map((match) => (
-                                <div className="team-submatch-card" key={match.id}>
-                                  <div className="team-submatch-head">
-                                    <strong>
-                                      {match.matchCategory === 'TEAM_DOUBLES' ? 'Doubles' : 'Singles'}
-                                    </strong>
-                                    <span>{match.groupName}</span>
-                                  </div>
-                                  {renderParticipantRow(match, 'A', undefined)}
-                                  {renderParticipantRow(match, 'B', undefined)}
-                                  <div className="match-foot">
-                                    <span>{getMatchDisplayScore(match)}</span>
-                                  </div>
-                                </div>
-                              ))}
+                              {duel.matches.map((match) => renderTeamBattleMatchCard(match))}
                             </div>
                           </section>
                         ))}

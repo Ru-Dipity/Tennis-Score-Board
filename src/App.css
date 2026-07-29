@@ -568,6 +568,82 @@ thead th {
   gap: 12px;
 }
 
+.team-submatch-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(132px, 180px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.team-submatch-side {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid #dbe6df;
+  background: #ffffff;
+}
+
+.team-submatch-side-a {
+  text-align: left;
+}
+
+.team-submatch-side-b {
+  text-align: right;
+}
+
+.team-submatch-side-winner {
+  border-color: rgba(22, 163, 74, 0.38);
+  background: linear-gradient(135deg, rgba(220, 252, 231, 0.82), #ffffff);
+}
+
+.team-submatch-team-label,
+.team-submatch-format {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.team-submatch-player-block {
+  display: grid;
+  gap: 8px;
+}
+
+.team-submatch-player-name {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.5;
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+
+.team-submatch-side-b .participant-badges,
+.team-submatch-side-b .set-score-strip {
+  justify-content: flex-end;
+}
+
+.team-submatch-scoreboard {
+  display: grid;
+  gap: 10px;
+  align-content: center;
+  justify-items: center;
+  padding: 14px 12px;
+  border-radius: 16px;
+  border: 1px solid #dbe6df;
+  background: linear-gradient(180deg, #ffffff, #f8fbf9);
+  text-align: center;
+}
+
+.team-submatch-score {
+  font-size: 18px;
+  line-height: 1.4;
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+
 .team-preview-row {
   display: flex;
   justify-content: space-between;
@@ -697,7 +773,8 @@ thead th {
   .form-grid,
   .team-preview-grid,
   .team-battle-summary,
-  .team-duel-summary {
+  .team-duel-summary,
+  .team-submatch-body {
     grid-template-columns: 1fr;
   }
 
@@ -747,6 +824,20 @@ thead th {
 
   .match-entry-actions {
     width: 100%;
+  }
+
+  .team-submatch-side,
+  .team-submatch-scoreboard {
+    width: 100%;
+  }
+
+  .team-submatch-side-b {
+    text-align: left;
+  }
+
+  .team-submatch-side-b .participant-badges,
+  .team-submatch-side-b .set-score-strip {
+    justify-content: flex-start;
   }
 
   .set-score-strip {
