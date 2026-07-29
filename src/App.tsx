@@ -357,7 +357,10 @@ function App() {
   );
 
   const manageablePlayers = useMemo(
-    () => [...players].sort((left, right) => left.name.localeCompare(right.name, 'en')),
+    () =>
+      [...players]
+        .filter((player) => player.isActive)
+        .sort((left, right) => left.name.localeCompare(right.name, 'en')),
     [players],
   );
 
@@ -1101,9 +1104,46 @@ function App() {
     const linkedEntries = entries.filter((entry) => entry.playerId === playerId);
 
     if (linkedTeams.length || linkedEntries.length) {
-      setStatusMessage(
-        `Cannot delete ${player?.name ?? 'this player'} because they are already used in a doubles team or tournament entry.`,
-      );
+      setSaving(true);
+      setStatusMessage('');
+      try {
+        const { data } = await client.models.Player.update(
+          {
+            id: playerId,
+            isActive: false,
+          } as any,
+          authModeForAdmin(true),
+        );
+        setPlayers((current) =>
+          upsertLocalItem(
+            current,
+            ({
+              ...(current.find((item) => item.id === playerId) ?? {}),
+              id: playerId,
+              isActive: false,
+              ...(data ?? {}),
+            } as Player),
+          ),
+        );
+        setTeamForm((current) => ({
+          ...current,
+          playerOneId: current.playerOneId === playerId ? '' : current.playerOneId,
+          playerTwoId: current.playerTwoId === playerId ? '' : current.playerTwoId,
+        }));
+        setTournamentForm((current) => ({
+          ...current,
+          selectedParticipantIds: current.selectedParticipantIds.filter((id) => id !== playerId),
+        }));
+        setStatusMessage(
+          `Player "${player?.name ?? 'Unknown'}" is already used in a team or tournament, so it was archived and removed from active lists instead of being hard-deleted.`,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to archive the player.';
+        setStatusMessage(message);
+      } finally {
+        setSaving(false);
+      }
       return;
     }
 
@@ -1430,25 +1470,6 @@ function App() {
                     </div>
                   ) : null}
 
-                  <div className="history-list">
-                    <h4>Completed Matches</h4>
-                    {tournamentMatches.filter((match) => match.status === 'COMPLETED').length === 0 ? (
-                      <p className="history-empty">No completed matches yet.</p>
-                    ) : (
-                      tournamentMatches
-                        .filter((match) => match.status === 'COMPLETED')
-                        .map((match) => (
-                          <div className="history-item" key={`${tournament.id}-${match.id}`}>
-                            <div>
-                              <strong>{match.participantAName || 'TBD'}</strong>
-                              <span> vs </span>
-                              <strong>{match.participantBName || 'TBD'}</strong>
-                            </div>
-                            <span>{getMatchDisplayScore(match)}</span>
-                          </div>
-                        ))
-                    )}
-                  </div>
                 </article>
               );
             })}
@@ -1616,7 +1637,7 @@ function App() {
                     required
                   >
                     <option value="">Select a player</option>
-                    {players.map((player) => (
+                    {manageablePlayers.map((player) => (
                       <option key={player.id} value={player.id}>
                         {player.name}
                       </option>
@@ -1633,7 +1654,7 @@ function App() {
                     required
                   >
                     <option value="">Select a player</option>
-                    {players.map((player) => (
+                    {manageablePlayers.map((player) => (
                       <option key={player.id} value={player.id}>
                         {player.name}
                       </option>
