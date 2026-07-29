@@ -1345,7 +1345,6 @@ function App() {
     const isWinner = isSideWinner(match, side);
     const participantName = side === 'A' ? match.participantAName : match.participantBName;
     const teamLabel = side === 'A' ? match.participantATeamLabel : match.participantBTeamLabel;
-    const scores = getScoreList(match, side);
     const isDoubles = match.matchCategory === 'TEAM_DOUBLES';
 
     // For doubles, split "name1 / name2" into separate <span> elements
@@ -1370,17 +1369,6 @@ function App() {
           <div className="participant-badges">
             {isWinner ? <span className="inline-badge winner-badge">✓ Winner</span> : null}
           </div>
-        </div>
-        <div className="set-score-strip">
-          {scores.length ? (
-            scores.map((score: number, index: number) => (
-              <span className="set-score-cell" key={`${match.id}-${side}-team-${index}`}>
-                {score}
-              </span>
-            ))
-          ) : (
-            <span className="set-score-placeholder">—</span>
-          )}
         </div>
       </div>
     );
@@ -1503,26 +1491,45 @@ function App() {
   return (
     <div className="app-shell">
       <header className="hero-banner">
-        <div>
-          <p className="eyebrow">Tennis Tournament Control Center</p>
+        <div className="hero-left">
+          <span className="hero-tag">🎾 LIVE SCOREBOARD & TOURNAMENT CENTER</span>
           <h1>Tennis Score Board</h1>
           <p className="hero-copy">
-            Visitors can follow live tournaments in real time, while admins can manage players,
-            teams, draws, team battles, and multi-set score entry from a single control panel.
+            Real-time scores, interactive brackets, and team battle controls — simplified for players and admins.
           </p>
+          <div className="hero-actions">
+            <button className="hero-btn hero-btn-primary" type="button">
+              🏆 View Live Draws
+            </button>
+            <button className="hero-btn hero-btn-secondary" type="button">
+              ⚡ Admin Control
+            </button>
+          </div>
         </div>
-        <div className="hero-stats">
-          <div className="stat-card">
-            <span>Active tournaments</span>
-            <strong>{activeTournaments.length}</strong>
+        <div className="hero-live-widget">
+          <div className="live-widget-header">
+            <span className="live-dot"></span>
+            <span className="live-label">Live Overview</span>
           </div>
-          <div className="stat-card">
-            <span>Players</span>
-            <strong>{players.length}</strong>
+          <div className="live-widget-stats">
+            <div className="live-stat-item">
+              <span className="live-stat-label">Active tournaments</span>
+              <strong className="live-stat-value">{activeTournaments.length}</strong>
+            </div>
+            <div className="live-stat-divider"></div>
+            <div className="live-stat-item">
+              <span className="live-stat-label">Players</span>
+              <strong className="live-stat-value">{players.filter((p) => p.isActive !== false).length}</strong>
+            </div>
+            <div className="live-stat-divider"></div>
+            <div className="live-stat-item">
+              <span className="live-stat-label">Matches</span>
+              <strong className="live-stat-value">{matches.length}</strong>
+            </div>
           </div>
-          <div className="stat-card">
-            <span>Matches</span>
-            <strong>{matches.length}</strong>
+          <div className="live-widget-footer">
+            <span className="live-update-badge">● Live</span>
+            <span>Auto-sync via Amplify</span>
           </div>
         </div>
       </header>
