@@ -13,6 +13,7 @@ import './App.css';
 import {
   buildKnockoutPlan,
   buildRoundRobinPlan,
+  buildScoreSummary,
   buildTeamBattlePlan,
   calculateGroupStandings,
   calculateTeamBattleSummary,
@@ -132,6 +133,62 @@ function groupKnockoutRounds(tournamentMatches: Match[]) {
   return Array.from(roundMap.entries()).sort(([left], [right]) => left - right);
 }
 
+function defaultTeamLabel(index: number) {
+  return index < 26 ? `Team ${String.fromCharCode(65 + index)}` : `Team ${index + 1}`;
+}
+
+function normalizeTeamLabels(labels: string[], teamCount: number) {
+  return Array.from({ length: teamCount }, (_, index) => {
+    const provided = labels[index]?.trim();
+    return provided || defaultTeamLabel(index);
+  });
+}
+
+function getParticipantEntryIds(match: Match, side: WinnerSide) {
+  const entryIds =
+    side === 'A' ? match.participantAEntryIds ?? [] : match.participantBEntryIds ?? [];
+  const singleEntryId =
+    side === 'A' ? match.participantAEntryId : match.participantBEntryId;
+
+  if (entryIds.length) {
+    return entryIds;
+  }
+
+  return singleEntryId ? [singleEntryId] : [];
+}
+
+function getMatchDisplayScore(match: Match) {
+  return (
+    buildScoreSummary(match.participantAScores ?? [], match.participantBScores ?? []) ||
+    match.score ||
+    'Score pending'
+  );
+}
+
+function groupTeamBattleDuels(tournamentMatches: Match[]) {
+  const duelMap = new Map<string, Match[]>();
+
+  tournamentMatches
+    .filter((match) => match.stage === 'TEAM_BATTLE')
+    .forEach((match) => {
+      const duelLabel =
+        match.roundLabel ||
+        `${match.participantATeamLabel || 'Team A'} vs ${match.participantBTeamLabel || 'Team B'}`;
+      const duelMatches = duelMap.get(duelLabel) ?? [];
+      duelMatches.push(match);
+      duelMap.set(duelLabel, duelMatches);
+    });
+
+  return Array.from(duelMap.entries())
+    .map(([duelLabel, duelMatches]) => ({
+      duelLabel,
+      matches: [...duelMatches].sort((left, right) => left.displayOrder - right.displayOrder),
+      summary: calculateTeamBattleSummary(duelMatches as any[]),
+      displayOrder: Math.min(...duelMatches.map((match) => match.displayOrder)),
+    }))
+    .sort((left, right) => left.displayOrder - right.displayOrder);
+}
+
 function App() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
@@ -165,8 +222,7 @@ function App() {
     customRoundLabels: '',
     teamCount: 2,
     teamSize: 4,
-    teamALabel: 'Team A',
-    teamBLabel: 'Team B',
+    teamLabels: ['Team A', 'Team B'],
   });
   const [matchForm, setMatchForm] = useState({
     matchId: '',
@@ -252,7 +308,7 @@ function App() {
       return [];
     }
 
-    const labels = [tournamentForm.teamALabel.trim() || 'Team A', tournamentForm.teamBLabel.trim() || 'Team B'];
+    const labels = normalizeTeamLabels(tournamentForm.teamLabels, tournamentForm.teamCount);
     return labels.map((label, teamIndex) => ({
       label,
       members: selectedParticipants.slice(
@@ -264,8 +320,8 @@ function App() {
     selectedParticipants,
     tournamentForm.eventType,
     tournamentForm.mode,
-    tournamentForm.teamALabel,
-    tournamentForm.teamBLabel,
+    tournamentForm.teamCount,
+    tournamentForm.teamLabels,
     tournamentForm.teamSize,
   ]);
 
@@ -299,6 +355,10 @@ function App() {
             tournament.mode === 'TEAM_BATTLE'
               ? calculateTeamBattleSummary(tournamentMatches as any[])
               : null,
+          teamDuels:
+            tournament.mode === 'TEAM_BATTLE'
+              ? groupTeamBattleDuels(tournamentMatches)
+              : [],
         };
       }),
     [activeTournaments, entries, matches],
@@ -310,14 +370,6 @@ function App() {
         left.name.localeCompare(right.name, 'en'),
       ),
     [tournaments],
-  );
-
-  const editableMatches = useMemo(
-    () =>
-      [...matches]
-        .filter((match) => match.status !== 'COMPLETED')
-        .sort((left, right) => left.displayOrder - right.displayOrder),
-    [matches],
   );
 
   const selectedMatch = useMemo(
@@ -336,6 +388,29 @@ function App() {
   const selectedMatchFormat = (selectedMatch?.matchFormat ||
     selectedMatchTournament?.matchFormat ||
     'BEST_OF_3') as MatchFormat;
+
+  const adminScorableMatches = useMemo(
+    () =>
+      [...matches]
+        .filter((match) => match.participantAName && match.participantBName)
+        .sort((left, right) => left.displayOrder - right.displayOrder),
+    [matches],
+  );
+
+  function upsertLocalItem<T extends { id: string }>(items: T[], item: T) {
+    const index = items.findIndex((current) => current.id === item.id);
+    if (index === -1) {
+      return [...items, item];
+    }
+
+    const nextItems = [...items];
+    nextItems[index] = { ...nextItems[index], ...item };
+    return nextItems;
+  }
+
+  function removeLocalItem<T extends { id: string }>(items: T[], id: string) {
+    return items.filter((item) => item.id !== id);
+  }
 
   async function checkAdminSession() {
     try {
@@ -380,8 +455,29 @@ function App() {
       ...current,
       eventType: nextEventType,
       mode: nextEventType === 'TEAM' ? 'TEAM_BATTLE' : current.mode === 'TEAM_BATTLE' ? 'KNOCKOUT' : current.mode,
+      teamLabels: normalizeTeamLabels(current.teamLabels, current.teamCount),
       selectedParticipantIds: [],
     }));
+  }
+
+  function updateTeamCount(teamCount: number) {
+    setTournamentForm((current) => ({
+      ...current,
+      teamCount,
+      teamLabels: normalizeTeamLabels(current.teamLabels, teamCount),
+      selectedParticipantIds: [],
+    }));
+  }
+
+  function updateTeamLabel(index: number, value: string) {
+    setTournamentForm((current) => {
+      const nextLabels = normalizeTeamLabels(current.teamLabels, current.teamCount);
+      nextLabels[index] = value;
+      return {
+        ...current,
+        teamLabels: nextLabels,
+      };
+    });
   }
 
   function toggleParticipantSelection(participantId: string, checked: boolean) {
@@ -409,7 +505,7 @@ function App() {
     setSaving(true);
     setStatusMessage('');
     try {
-      await client.models.Player.create(
+      const { data } = await client.models.Player.create(
         {
           name: playerForm.name.trim(),
           gender: playerForm.gender,
@@ -417,6 +513,9 @@ function App() {
         } as any,
         authModeForAdmin(true),
       );
+      if (data) {
+        setPlayers((current) => upsertLocalItem(current, data as Player));
+      }
       setPlayerForm({ name: '', gender: 'UNSPECIFIED' });
       setStatusMessage('Player created successfully.');
     } finally {
@@ -447,7 +546,7 @@ function App() {
     setSaving(true);
     setStatusMessage('');
     try {
-      await client.models.Team.create(
+      const { data } = await client.models.Team.create(
         {
           name: teamForm.name.trim() || defaultName,
           playerOneId: teamForm.playerOneId,
@@ -455,6 +554,9 @@ function App() {
         } as any,
         authModeForAdmin(true),
       );
+      if (data) {
+        setTeams((current) => upsertLocalItem(current, data as Team));
+      }
       setTeamForm({ name: '', playerOneId: '', playerTwoId: '' });
       setStatusMessage('Doubles team created successfully.');
     } finally {
@@ -477,10 +579,6 @@ function App() {
     }
 
     if (effectiveMode === 'TEAM_BATTLE') {
-      if (tournamentForm.teamCount !== 2) {
-        setStatusMessage('Current team battle mode supports exactly 2 teams.');
-        return;
-      }
       if (tournamentForm.teamSize < 2 || tournamentForm.teamSize % 2 !== 0) {
         setStatusMessage('Team size must be an even number and at least 2.');
         return;
@@ -547,7 +645,7 @@ function App() {
               participantSeeds,
               tournamentForm.teamCount,
               tournamentForm.teamSize,
-              [tournamentForm.teamALabel, tournamentForm.teamBLabel],
+              normalizeTeamLabels(tournamentForm.teamLabels, tournamentForm.teamCount),
               tournamentForm.matchFormat,
             )
           : effectiveMode === 'KNOCKOUT'
@@ -579,7 +677,7 @@ function App() {
         teamSize: effectiveMode === 'TEAM_BATTLE' ? tournamentForm.teamSize : undefined,
         teamLabels:
           effectiveMode === 'TEAM_BATTLE'
-            ? [tournamentForm.teamALabel.trim() || 'Team A', tournamentForm.teamBLabel.trim() || 'Team B']
+            ? normalizeTeamLabels(tournamentForm.teamLabels, tournamentForm.teamCount)
             : undefined,
         startedAt: new Date().toISOString(),
       };
@@ -592,6 +690,8 @@ function App() {
       if (!createdTournament) {
         throw new Error('Tournament creation failed.');
       }
+
+      setTournaments((current) => upsertLocalItem(current, createdTournament as Tournament));
 
       const entryIdBySeed = new Map<number, string>();
 
@@ -616,6 +716,7 @@ function App() {
 
         if (createdEntry) {
           entryIdBySeed.set(entry.seed, createdEntry.id);
+          setEntries((current) => upsertLocalItem(current, createdEntry as TournamentEntry));
         }
       }
 
@@ -659,7 +760,13 @@ function App() {
           completedAt: match.status === 'COMPLETED' ? new Date().toISOString() : undefined,
         };
 
-        await client.models.Match.create(payload as any, authModeForAdmin(true));
+        const { data: createdMatch } = await client.models.Match.create(
+          payload as any,
+          authModeForAdmin(true),
+        );
+        if (createdMatch) {
+          setMatches((current) => upsertLocalItem(current, createdMatch as Match));
+        }
       }
 
       setTournamentForm({
@@ -673,8 +780,7 @@ function App() {
         customRoundLabels: '',
         teamCount: 2,
         teamSize: 4,
-        teamALabel: 'Team A',
-        teamBLabel: 'Team B',
+        teamLabels: ['Team A', 'Team B'],
       });
       setStatusMessage(`Tournament "${createdTournament.name}" was created successfully.`);
     } catch (error) {
@@ -706,34 +812,61 @@ function App() {
     });
   }
 
-  async function maybeCompleteTournament(tournamentId: string, updatedMatchId: string) {
-    const tournamentMatches = matches.filter((match) => match.tournamentId === tournamentId);
-    const allCompleted = tournamentMatches.every(
-      (match) => match.id === updatedMatchId || match.status === 'COMPLETED',
+  function mergeMatchState(
+    currentMatches: Match[],
+    matchId: string,
+    updatePayload: Record<string, unknown>,
+    serverMatch?: Match | null,
+  ) {
+    const existingMatch = currentMatches.find((match) => match.id === matchId);
+    if (!existingMatch) {
+      return currentMatches;
+    }
+
+    return upsertLocalItem(currentMatches, {
+      ...existingMatch,
+      ...updatePayload,
+      ...(serverMatch ?? {}),
+    } as Match);
+  }
+
+  async function syncTournamentStatus(tournamentId: string, nextMatches: Match[]) {
+    const tournamentMatches = nextMatches.filter((match) => match.tournamentId === tournamentId);
+    const allCompleted =
+      tournamentMatches.length > 0 &&
+      tournamentMatches.every((match) => match.status === 'COMPLETED');
+
+    const updatePayload: any = {
+      id: tournamentId,
+      status: allCompleted ? 'COMPLETED' : 'LIVE',
+      completedAt: allCompleted ? new Date().toISOString() : null,
+    };
+
+    const { data } = await client.models.Tournament.update(
+      updatePayload,
+      authModeForAdmin(true),
     );
 
-    if (allCompleted) {
-      await client.models.Tournament.update(
-        {
-          id: tournamentId,
-          status: 'COMPLETED',
-          completedAt: new Date().toISOString(),
-        } as any,
-        authModeForAdmin(true),
-      );
-    }
+    setTournaments((current) =>
+      upsertLocalItem(current, {
+        ...(current.find((tournament) => tournament.id === tournamentId) ?? {}),
+        ...updatePayload,
+        ...(data ?? {}),
+      } as Tournament),
+    );
   }
 
   async function cascadeKnockoutUpdate(
     sourceMatchId: string,
     winner: { winnerEntryIds?: string[]; winnerName?: string } = {},
+    localMatches: Match[] = matches,
   ) {
-    const currentMatch = matches.find((match) => match.id === sourceMatchId);
+    const currentMatch = localMatches.find((match) => match.id === sourceMatchId);
     if (!currentMatch) {
-      return;
+      return localMatches;
     }
 
-    const nextMatch = matches.find(
+    const nextMatch = localMatches.find(
       (match) =>
         match.tournamentId === currentMatch.tournamentId &&
         match.stage === 'KNOCKOUT' &&
@@ -742,15 +875,15 @@ function App() {
     );
 
     if (!nextMatch) {
-      return;
+      return localMatches;
     }
 
     const isLeftBracket = currentMatch.matchNumber % 2 === 1;
     const participantAEntryIds = isLeftBracket
       ? winner.winnerEntryIds ?? []
-      : nextMatch.participantAEntryIds ?? (nextMatch.participantAEntryId ? [nextMatch.participantAEntryId] : []);
+      : getParticipantEntryIds(nextMatch, 'A');
     const participantBEntryIds = isLeftBracket
-      ? nextMatch.participantBEntryIds ?? (nextMatch.participantBEntryId ? [nextMatch.participantBEntryId] : [])
+      ? getParticipantEntryIds(nextMatch, 'B')
       : winner.winnerEntryIds ?? [];
 
     const updatePayload: any = {
@@ -771,8 +904,14 @@ function App() {
       completedAt: null,
     };
 
-    await client.models.Match.update(updatePayload as any, authModeForAdmin(true));
-    await cascadeKnockoutUpdate(nextMatch.id, {});
+    const { data } = await client.models.Match.update(updatePayload as any, authModeForAdmin(true));
+    const nextLocalMatches = mergeMatchState(
+      localMatches,
+      nextMatch.id,
+      updatePayload,
+      data as Match | null,
+    );
+    return cascadeKnockoutUpdate(nextMatch.id, {}, nextLocalMatches);
   }
 
   async function recordMatch(event: React.FormEvent<HTMLFormElement>) {
@@ -796,46 +935,56 @@ function App() {
       evaluated.winner === 'A'
         ? selectedMatch.participantAEntryId ?? null
         : selectedMatch.participantBEntryId ?? null;
-    const winnerEntryIds =
-      evaluated.winner === 'A'
-        ? selectedMatch.participantAEntryIds ?? (selectedMatch.participantAEntryId ? [selectedMatch.participantAEntryId] : [])
-        : selectedMatch.participantBEntryIds ?? (selectedMatch.participantBEntryId ? [selectedMatch.participantBEntryId] : []);
+    const winnerEntryIds = getParticipantEntryIds(selectedMatch, evaluated.winner);
     const winnerName =
       evaluated.winner === 'A'
         ? selectedMatch.participantAName
         : selectedMatch.participantBName;
+    const updatePayload: any = {
+      id: selectedMatch.id,
+      participantAScores: evaluated.participantAScores,
+      participantBScores: evaluated.participantBScores,
+      winnerEntryId,
+      winnerSide: evaluated.winner,
+      score: evaluated.summary,
+      status: 'COMPLETED',
+      completedAt: new Date().toISOString(),
+    };
 
     setSaving(true);
     setStatusMessage('');
 
     try {
-      await client.models.Match.update(
-        {
-          id: selectedMatch.id,
-          participantAScores: evaluated.participantAScores,
-          participantBScores: evaluated.participantBScores,
-          winnerEntryId,
-          winnerSide: evaluated.winner,
-          score: evaluated.summary,
-          status: 'COMPLETED',
-          completedAt: new Date().toISOString(),
-        } as any,
+      const { data } = await client.models.Match.update(
+        updatePayload as any,
         authModeForAdmin(true),
       );
+      let nextMatches = mergeMatchState(
+        matches,
+        selectedMatch.id,
+        updatePayload,
+        data as Match | null,
+      );
+      setMatches(nextMatches);
 
       if (selectedMatch.stage === 'KNOCKOUT') {
-        await cascadeKnockoutUpdate(selectedMatch.id, {
+        nextMatches = await cascadeKnockoutUpdate(
+          selectedMatch.id,
+          {
           winnerEntryIds,
           winnerName,
-        });
+          },
+          nextMatches,
+        );
+        setMatches(nextMatches);
       }
 
-      await maybeCompleteTournament(selectedMatch.tournamentId, selectedMatch.id);
+      await syncTournamentStatus(selectedMatch.tournamentId, nextMatches);
 
       setMatchForm({
-        matchId: '',
-        participantAScores: createEmptyScoreInputs('BEST_OF_3'),
-        participantBScores: createEmptyScoreInputs('BEST_OF_3'),
+        matchId: selectedMatch.id,
+        participantAScores: hydrateScoreInputs(evaluated.participantAScores, selectedMatchFormat),
+        participantBScores: hydrateScoreInputs(evaluated.participantBScores, selectedMatchFormat),
       });
       setStatusMessage('Match score saved successfully.');
     } catch (error) {
@@ -846,10 +995,69 @@ function App() {
     }
   }
 
+  async function clearMatchScore() {
+    if (!isAdmin || !selectedMatch) {
+      return;
+    }
+
+    const updatePayload: any = {
+      id: selectedMatch.id,
+      participantAScores: null,
+      participantBScores: null,
+      winnerEntryId: null,
+      winnerSide: null,
+      score: null,
+      status:
+        selectedMatch.participantAName && selectedMatch.participantBName
+          ? 'IN_PROGRESS'
+          : 'PENDING',
+      completedAt: null,
+    };
+
+    setSaving(true);
+    setStatusMessage('');
+
+    try {
+      const { data } = await client.models.Match.update(
+        updatePayload as any,
+        authModeForAdmin(true),
+      );
+      let nextMatches = mergeMatchState(
+        matches,
+        selectedMatch.id,
+        updatePayload,
+        data as Match | null,
+      );
+      setMatches(nextMatches);
+
+      if (selectedMatch.stage === 'KNOCKOUT') {
+        nextMatches = await cascadeKnockoutUpdate(selectedMatch.id, {}, nextMatches);
+        setMatches(nextMatches);
+      }
+
+      await syncTournamentStatus(selectedMatch.tournamentId, nextMatches);
+      setMatchForm({
+        matchId: selectedMatch.id,
+        participantAScores: createEmptyScoreInputs(selectedMatchFormat),
+        participantBScores: createEmptyScoreInputs(selectedMatchFormat),
+      });
+      setStatusMessage('Match score removed. You can submit a new score now.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to clear the match score.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function deleteTournament(tournamentId: string) {
     if (!isAdmin) {
       return;
     }
+
+    const shouldResetSelectedMatch = matches.some(
+      (match) => match.id === matchForm.matchId && match.tournamentId === tournamentId,
+    );
 
     setSaving(true);
     setStatusMessage('');
@@ -872,6 +1080,20 @@ function App() {
         { id: tournamentId } as any,
         authModeForAdmin(true),
       );
+      setMatches((current) =>
+        current.filter((match) => match.tournamentId !== tournamentId),
+      );
+      setEntries((current) =>
+        current.filter((entry) => entry.tournamentId !== tournamentId),
+      );
+      setTournaments((current) => removeLocalItem(current, tournamentId));
+      if (shouldResetSelectedMatch) {
+        setMatchForm({
+          matchId: '',
+          participantAScores: createEmptyScoreInputs('BEST_OF_3'),
+          participantBScores: createEmptyScoreInputs('BEST_OF_3'),
+        });
+      }
       setStatusMessage('Tournament deleted.');
     } finally {
       setSaving(false);
@@ -963,7 +1185,7 @@ function App() {
           </div>
         ) : (
           <div className="tournament-grid">
-            {tournamentCards.map(({ tournament, entries: tournamentEntries, matches: tournamentMatches, standings, teamSummary }) => {
+            {tournamentCards.map(({ tournament, entries: tournamentEntries, matches: tournamentMatches, standings, teamSummary, teamDuels }) => {
               const finalMatch = getFinalMatch(tournamentMatches);
               return (
                 <article className="tournament-card" key={tournament.id}>
@@ -1087,19 +1309,52 @@ function App() {
                         ))}
                       </div>
 
-                      <div className="team-submatch-list">
-                        {tournamentMatches.map((match) => (
-                          <div className="team-submatch-card" key={match.id}>
+                      <div className="team-duel-grid">
+                        {teamDuels.map((duel) => (
+                          <section className="team-duel-card" key={`${tournament.id}-${duel.duelLabel}`}>
                             <div className="team-submatch-head">
-                              <strong>{match.roundLabel}</strong>
-                              <span>{match.matchCategory === 'TEAM_DOUBLES' ? 'Doubles' : 'Singles'}</span>
+                              <strong>{duel.duelLabel}</strong>
+                              <span>
+                                {duel.summary.teams
+                                  .map((team) => `${team.teamLabel}: ${team.matchWins}`)
+                                  .join(' · ')}
+                              </span>
                             </div>
-                            {renderParticipantRow(match, 'A', undefined)}
-                            {renderParticipantRow(match, 'B', undefined)}
-                            <div className="match-foot">
-                              <span>{match.score || 'Score pending'}</span>
+
+                            <div className="team-duel-summary">
+                              {duel.summary.teams.map((team) => (
+                                <div
+                                  className={`team-summary-card ${duel.summary.winner?.teamLabel === team.teamLabel ? 'team-summary-winner' : ''}`}
+                                  key={`${duel.duelLabel}-${team.teamLabel}`}
+                                >
+                                  <h4>{team.teamLabel}</h4>
+                                  <div className="team-summary-stats">
+                                    <span>Match wins: <strong>{team.matchWins}</strong></span>
+                                    <span>Games won: <strong>{team.gamesWon}</strong></span>
+                                    <span>Net games: <strong>{team.gamesWon - team.gamesLost}</strong></span>
+                                  </div>
+                                </div>
+                              ))}
                             </div>
-                          </div>
+
+                            <div className="team-submatch-list">
+                              {duel.matches.map((match) => (
+                                <div className="team-submatch-card" key={match.id}>
+                                  <div className="team-submatch-head">
+                                    <strong>
+                                      {match.matchCategory === 'TEAM_DOUBLES' ? 'Doubles' : 'Singles'}
+                                    </strong>
+                                    <span>{match.groupName}</span>
+                                  </div>
+                                  {renderParticipantRow(match, 'A', undefined)}
+                                  {renderParticipantRow(match, 'B', undefined)}
+                                  <div className="match-foot">
+                                    <span>{getMatchDisplayScore(match)}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </section>
                         ))}
                       </div>
                     </div>
@@ -1119,7 +1374,7 @@ function App() {
                               <span> vs </span>
                               <strong>{match.participantBName || 'TBD'}</strong>
                             </div>
-                            <span>{match.score || 'Completed'}</span>
+                            <span>{getMatchDisplayScore(match)}</span>
                           </div>
                         ))
                     )}
@@ -1387,14 +1642,8 @@ function App() {
                         <input
                           type="number"
                           min={2}
-                          max={2}
                           value={tournamentForm.teamCount}
-                          onChange={(event) =>
-                            setTournamentForm((current) => ({
-                              ...current,
-                              teamCount: Number(event.target.value),
-                            }))
-                          }
+                          onChange={(event) => updateTeamCount(Number(event.target.value))}
                         />
                       </label>
                       <label>
@@ -1413,32 +1662,19 @@ function App() {
                           }
                         />
                       </label>
-                      <label>
-                        Team A label
-                        <input
-                          type="text"
-                          value={tournamentForm.teamALabel}
-                          onChange={(event) =>
-                            setTournamentForm((current) => ({
-                              ...current,
-                              teamALabel: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Team B label
-                        <input
-                          type="text"
-                          value={tournamentForm.teamBLabel}
-                          onChange={(event) =>
-                            setTournamentForm((current) => ({
-                              ...current,
-                              teamBLabel: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
+                      {normalizeTeamLabels(
+                        tournamentForm.teamLabels,
+                        tournamentForm.teamCount,
+                      ).map((label, index) => (
+                        <label key={`team-label-${index}`}>
+                          Team {index + 1} label
+                          <input
+                            type="text"
+                            value={label}
+                            onChange={(event) => updateTeamLabel(index, event.target.value)}
+                          />
+                        </label>
+                      ))}
                     </>
                   )}
 
@@ -1590,10 +1826,11 @@ function App() {
                     required
                   >
                     <option value="">Choose a match</option>
-                    {editableMatches.map((match) => (
+                    {adminScorableMatches.map((match) => (
                       <option key={match.id} value={match.id}>
-                        {match.roundLabel} - {match.participantAName || 'TBD'} vs{' '}
-                        {match.participantBName || 'TBD'}
+                        [{match.status === 'COMPLETED' ? 'Completed' : 'Open'}] {match.roundLabel} -{' '}
+                        {match.participantAName || 'TBD'} vs {match.participantBName || 'TBD'} ·{' '}
+                        {getMatchDisplayScore(match)}
                       </option>
                     ))}
                   </select>
@@ -1603,7 +1840,9 @@ function App() {
                   <div className="match-entry-panel">
                     <div className="match-entry-head">
                       <strong>{selectedMatch.roundLabel}</strong>
-                      <span>{getMatchFormatLabel(selectedMatchFormat)}</span>
+                      <span>
+                        {getMatchFormatLabel(selectedMatchFormat)} · {selectedMatch.status}
+                      </span>
                     </div>
 
                     <div className="set-entry-header">
@@ -1656,9 +1895,19 @@ function App() {
                   </div>
                 )}
 
-                <button className="primary-button" type="submit" disabled={saving || !selectedMatch}>
-                  Save score
-                </button>
+                <div className="match-entry-actions">
+                  <button className="primary-button" type="submit" disabled={saving || !selectedMatch}>
+                    Save score
+                  </button>
+                  <button
+                    className="danger-button"
+                    type="button"
+                    disabled={saving || !selectedMatch || selectedMatch.status !== 'COMPLETED'}
+                    onClick={() => void clearMatchScore()}
+                  >
+                    Delete score
+                  </button>
+                </div>
               </form>
 
               <div className="panel-form">

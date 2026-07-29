@@ -53,6 +53,7 @@ export type MatchPlan = {
   matchCategory: MatchCategory;
   participantATeamLabel?: string;
   participantBTeamLabel?: string;
+  teamDuelLabel?: string;
 };
 
 export type ParsedScore = {
@@ -171,6 +172,10 @@ function formatSeedNames(seeds: number[] | undefined, entryNames: Map<number, st
   }
 
   return seeds.map((seed) => entryNames.get(seed) ?? `Seed ${seed}`).join(' / ');
+}
+
+function defaultTeamLabel(index: number) {
+  return index < 26 ? `Team ${String.fromCharCode(65 + index)}` : `Team ${index + 1}`;
 }
 
 export function buildKnockoutPlan(
@@ -349,8 +354,8 @@ export function buildTeamBattlePlan(
   teamLabels: string[],
   matchFormat: MatchFormat = 'BEST_OF_3',
 ) {
-  if (teamCount !== 2) {
-    throw new Error('Current team battle implementation supports exactly 2 teams.');
+  if (teamCount < 2) {
+    throw new Error('Team battle requires at least 2 teams.');
   }
 
   if (participants.length !== teamCount * teamSize) {
@@ -364,7 +369,7 @@ export function buildTeamBattlePlan(
   const resolvedLabels =
     teamLabels.filter((label) => label.trim()).length === teamCount
       ? teamLabels.map((label) => label.trim())
-      : Array.from({ length: teamCount }, (_, index) => `Team ${String.fromCharCode(65 + index)}`);
+      : Array.from({ length: teamCount }, (_, index) => defaultTeamLabel(index));
 
   const entries: EntryPlan[] = [];
   const teamBuckets: EntryPlan[][] = [];
@@ -389,54 +394,66 @@ export function buildTeamBattlePlan(
     seed += teamEntries.length;
   }
 
-  const [teamA, teamB] = teamBuckets;
   const matches: MatchPlan[] = [];
   let displayOrder = 1;
+  let duelNumber = 1;
 
-  for (let index = 0; index < teamSize; index += 1) {
-    matches.push({
-      stage: 'TEAM_BATTLE',
-      status: 'PENDING',
-      roundNumber: 1,
-      roundLabel: 'Team Singles',
-      matchNumber: displayOrder,
-      displayOrder,
-      groupName: 'Singles',
-      participantASeeds: [teamA[index].seed],
-      participantAName: `${teamA[index].entryName} (#${teamA[index].teamOrder})`,
-      participantBSeeds: [teamB[index].seed],
-      participantBName: `${teamB[index].entryName} (#${teamB[index].teamOrder})`,
-      matchFormat,
-      matchCategory: 'TEAM_SINGLES',
-      participantATeamLabel: resolvedLabels[0],
-      participantBTeamLabel: resolvedLabels[1],
-    });
-    displayOrder += 1;
-  }
+  for (let teamAIndex = 0; teamAIndex < teamBuckets.length; teamAIndex += 1) {
+    for (let teamBIndex = teamAIndex + 1; teamBIndex < teamBuckets.length; teamBIndex += 1) {
+      const teamA = teamBuckets[teamAIndex];
+      const teamB = teamBuckets[teamBIndex];
+      const duelLabel = `${resolvedLabels[teamAIndex]} vs ${resolvedLabels[teamBIndex]}`;
 
-  const pairCount = teamSize / 2;
-  for (let index = 0; index < pairCount; index += 1) {
-    const participantASeeds = [teamA[index].seed, teamA[index + pairCount].seed];
-    const participantBSeeds = [teamB[index].seed, teamB[index + pairCount].seed];
+      for (let index = 0; index < teamSize; index += 1) {
+        matches.push({
+          stage: 'TEAM_BATTLE',
+          status: 'PENDING',
+          roundNumber: duelNumber,
+          roundLabel: duelLabel,
+          matchNumber: displayOrder,
+          displayOrder,
+          groupName: 'Singles',
+          participantASeeds: [teamA[index].seed],
+          participantAName: `${teamA[index].entryName} (#${teamA[index].teamOrder})`,
+          participantBSeeds: [teamB[index].seed],
+          participantBName: `${teamB[index].entryName} (#${teamB[index].teamOrder})`,
+          matchFormat,
+          matchCategory: 'TEAM_SINGLES',
+          participantATeamLabel: resolvedLabels[teamAIndex],
+          participantBTeamLabel: resolvedLabels[teamBIndex],
+          teamDuelLabel: duelLabel,
+        });
+        displayOrder += 1;
+      }
 
-    matches.push({
-      stage: 'TEAM_BATTLE',
-      status: 'PENDING',
-      roundNumber: 2,
-      roundLabel: 'Team Doubles',
-      matchNumber: displayOrder,
-      displayOrder,
-      groupName: 'Doubles',
-      participantASeeds,
-      participantAName: `${teamA[index].entryName} / ${teamA[index + pairCount].entryName}`,
-      participantBSeeds,
-      participantBName: `${teamB[index].entryName} / ${teamB[index + pairCount].entryName}`,
-      matchFormat,
-      matchCategory: 'TEAM_DOUBLES',
-      participantATeamLabel: resolvedLabels[0],
-      participantBTeamLabel: resolvedLabels[1],
-    });
-    displayOrder += 1;
+      const pairCount = teamSize / 2;
+      for (let index = 0; index < pairCount; index += 1) {
+        const participantASeeds = [teamA[index].seed, teamA[index + pairCount].seed];
+        const participantBSeeds = [teamB[index].seed, teamB[index + pairCount].seed];
+
+        matches.push({
+          stage: 'TEAM_BATTLE',
+          status: 'PENDING',
+          roundNumber: duelNumber,
+          roundLabel: duelLabel,
+          matchNumber: displayOrder,
+          displayOrder,
+          groupName: 'Doubles',
+          participantASeeds,
+          participantAName: `${teamA[index].entryName} / ${teamA[index + pairCount].entryName}`,
+          participantBSeeds,
+          participantBName: `${teamB[index].entryName} / ${teamB[index + pairCount].entryName}`,
+          matchFormat,
+          matchCategory: 'TEAM_DOUBLES',
+          participantATeamLabel: resolvedLabels[teamAIndex],
+          participantBTeamLabel: resolvedLabels[teamBIndex],
+          teamDuelLabel: duelLabel,
+        });
+        displayOrder += 1;
+      }
+
+      duelNumber += 1;
+    }
   }
 
   return {
@@ -585,10 +602,23 @@ export function parseScore(scoreText: string): ParsedScore | null {
   };
 }
 
+function inferMatchFormatFromScores(scoreCount: number): MatchFormat {
+  if (scoreCount <= 1) {
+    return 'SINGLE_SET';
+  }
+
+  if (scoreCount <= 3) {
+    return 'BEST_OF_3';
+  }
+
+  return 'BEST_OF_5';
+}
+
 function extractScoreInfo(match: {
   participantAScores?: Array<number | null | undefined> | null;
   participantBScores?: Array<number | null | undefined> | null;
   score?: string | null;
+  matchFormat?: MatchFormat | null;
 }) {
   const participantAScores = (match.participantAScores ?? []).filter(
     (value): value is number => typeof value === 'number',
@@ -598,7 +628,11 @@ function extractScoreInfo(match: {
   );
 
   if (participantAScores.length && participantAScores.length === participantBScores.length) {
-    return evaluateMatchScore(participantAScores, participantBScores, 'BEST_OF_5');
+    return evaluateMatchScore(
+      participantAScores,
+      participantBScores,
+      match.matchFormat ?? inferMatchFormatFromScores(participantAScores.length),
+    );
   }
 
   if (match.score) {

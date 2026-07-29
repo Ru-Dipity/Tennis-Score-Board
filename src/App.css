@@ -548,6 +548,26 @@ thead th {
   gap: 14px;
 }
 
+.team-duel-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.team-duel-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid #dbe6df;
+  background: #f8fbf9;
+}
+
+.team-duel-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
 .team-preview-row {
   display: flex;
   justify-content: space-between;
@@ -607,6 +627,12 @@ thead th {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
+}
+
+.match-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .set-entry-header,
@@ -670,7 +696,8 @@ thead th {
   .admin-grid,
   .form-grid,
   .team-preview-grid,
-  .team-battle-summary {
+  .team-battle-summary,
+  .team-duel-summary {
     grid-template-columns: 1fr;
   }
 
@@ -716,6 +743,10 @@ thead th {
   .entry-snapshot-row {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .match-entry-actions {
+    width: 100%;
   }
 
   .set-score-strip {
