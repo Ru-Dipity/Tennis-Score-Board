@@ -1498,10 +1498,18 @@ function App() {
             Real-time scores, interactive brackets, and team battle controls — simplified for players and admins.
           </p>
           <div className="hero-actions">
-            <button className="hero-btn hero-btn-primary" type="button">
+            <button
+              className="hero-btn hero-btn-primary"
+              type="button"
+              onClick={() => document.getElementById('live-tournament-display')?.scrollIntoView({ behavior: 'smooth' })}
+            >
               🏆 View Live Draws
             </button>
-            <button className="hero-btn hero-btn-secondary" type="button">
+            <button
+              className="hero-btn hero-btn-secondary"
+              type="button"
+              onClick={() => document.getElementById('admin-management')?.scrollIntoView({ behavior: 'smooth' })}
+            >
               ⚡ Admin Control
             </button>
           </div>
@@ -1534,16 +1542,12 @@ function App() {
         </div>
       </header>
 
-      <section className="section-card">
+      <section className="section-card" id="live-tournament-display">
         <div className="section-heading">
           <div>
             <p className="section-tag">Visitor View</p>
             <h2>Live Tournament Display</h2>
           </div>
-          <p className="section-desc">
-            All public screens are read-only and refresh automatically through Amplify real-time
-            subscriptions.
-          </p>
         </div>
 
         {tournamentCards.length === 0 ? (
@@ -1721,7 +1725,7 @@ function App() {
         )}
       </section>
 
-      <section className="section-card">
+      <section className="section-card" id="admin-management">
         <div className="section-heading">
           <div>
             <p className="section-tag">Admin Console</p>

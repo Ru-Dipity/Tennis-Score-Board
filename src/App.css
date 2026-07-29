@@ -808,7 +808,7 @@ thead th {
   flex-wrap: wrap;
   gap: 6px 14px;
   color: #475569;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -820,7 +820,7 @@ thead th {
 }
 
 .team-summary-stats strong {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 800;
   color: #1e293b;
   line-height: 1;
@@ -907,7 +907,7 @@ thead th {
 }
 
 .team-submatch-player-name {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.35;
   color: #0f172a;
@@ -916,7 +916,7 @@ thead th {
 
 /* Doubles: two player names stacked tightly */
 .team-submatch-player-name + .team-submatch-player-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: #334155;
 }
@@ -1238,11 +1238,11 @@ thead th {
   }
 
   .team-submatch-player-name {
-    font-size: 14px;
+    font-size: 15px;
   }
 
   .team-submatch-player-name + .team-submatch-player-name {
-    font-size: 12px;
+    font-size: 13px;
   }
 
   /* ── Scoreboard: horizontal row on mobile ── */
@@ -1331,11 +1331,11 @@ thead th {
   }
 
   .team-submatch-player-name {
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .team-submatch-player-name + .team-submatch-player-name {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .team-submatch-scoreboard {
