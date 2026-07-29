@@ -1,8 +1,15 @@
-export type TournamentMode = 'KNOCKOUT' | 'ROUND_ROBIN';
-export type EventType = 'SINGLES' | 'DOUBLES';
+export type TournamentMode = 'KNOCKOUT' | 'ROUND_ROBIN' | 'TEAM_BATTLE';
+export type EventType = 'SINGLES' | 'DOUBLES' | 'TEAM';
 export type ParticipantType = 'PLAYER' | 'TEAM';
-export type MatchStage = 'GROUP' | 'KNOCKOUT';
+export type MatchStage = 'GROUP' | 'KNOCKOUT' | 'TEAM_BATTLE';
 export type MatchStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED';
+export type MatchFormat = 'SINGLE_SET' | 'BEST_OF_3' | 'BEST_OF_5';
+export type MatchCategory =
+  | 'STANDARD_SINGLES'
+  | 'STANDARD_DOUBLES'
+  | 'TEAM_SINGLES'
+  | 'TEAM_DOUBLES';
+export type WinnerSide = 'A' | 'B';
 
 export type ParticipantSeed = {
   sourceId: string;
@@ -10,6 +17,7 @@ export type ParticipantSeed = {
   participantType: ParticipantType;
   playerId?: string;
   teamId?: string;
+  selectionOrder?: number;
 };
 
 export type EntryPlan = {
@@ -21,6 +29,7 @@ export type EntryPlan = {
   groupName?: string;
   slotNumber: number;
   isBye: boolean;
+  teamOrder?: number;
 };
 
 export type MatchPlan = {
@@ -31,12 +40,19 @@ export type MatchPlan = {
   matchNumber: number;
   displayOrder: number;
   groupName?: string;
-  participantASeed?: number;
+  participantASeeds?: number[];
   participantAName?: string;
-  participantBSeed?: number;
+  participantBSeeds?: number[];
   participantBName?: string;
-  winnerSeed?: number;
+  winnerSeeds?: number[];
+  winnerSide?: WinnerSide;
   score?: string;
+  participantAScores?: number[];
+  participantBScores?: number[];
+  matchFormat: MatchFormat;
+  matchCategory: MatchCategory;
+  participantATeamLabel?: string;
+  participantBTeamLabel?: string;
 };
 
 export type ParsedScore = {
@@ -44,7 +60,13 @@ export type ParsedScore = {
   setsB: number;
   gamesA: number;
   gamesB: number;
-  winner: 'A' | 'B';
+  winner: WinnerSide;
+};
+
+export type EvaluatedMatchScore = ParsedScore & {
+  participantAScores: number[];
+  participantBScores: number[];
+  summary: string;
 };
 
 type StandingAccumulator = {
@@ -54,6 +76,13 @@ type StandingAccumulator = {
   wins: number;
   losses: number;
   points: number;
+  gamesWon: number;
+  gamesLost: number;
+};
+
+type TeamBattleAccumulator = {
+  teamLabel: string;
+  matchWins: number;
   gamesWon: number;
   gamesLost: number;
 };
@@ -71,6 +100,24 @@ export function nextPowerOfTwo(value: number) {
   return size;
 }
 
+export function getBestOf(matchFormat: MatchFormat) {
+  if (matchFormat === 'BEST_OF_5') {
+    return 5;
+  }
+  if (matchFormat === 'BEST_OF_3') {
+    return 3;
+  }
+  return 1;
+}
+
+export function getRequiredSetWins(matchFormat: MatchFormat) {
+  return Math.ceil(getBestOf(matchFormat) / 2);
+}
+
+export function createEmptyScoreInputs(matchFormat: MatchFormat) {
+  return Array.from({ length: getBestOf(matchFormat) }, () => '');
+}
+
 export function createRoundLabels(bracketSize: number, customLabels: string[] = []) {
   const rounds = Math.log2(bracketSize);
   const labels: string[] = [];
@@ -84,26 +131,53 @@ export function createRoundLabels(bracketSize: number, customLabels: string[] = 
     }
 
     if (remaining === 2) {
-      labels.push('决赛');
+      labels.push('Final');
     } else if (remaining === 4) {
-      labels.push('半决赛');
+      labels.push('Semifinal');
     } else if (remaining === 8) {
-      labels.push('8强');
+      labels.push('Quarterfinal');
     } else if (remaining === 16) {
-      labels.push('16强');
+      labels.push('Round of 16');
     } else if (remaining === 32) {
-      labels.push('32强');
+      labels.push('Round of 32');
     } else {
-      labels.push(`${remaining}强`);
+      labels.push(`Round of ${remaining}`);
     }
   }
 
   return labels;
 }
 
+export function shuffleSelectedParticipants(items: string[]) {
+  const shuffled = [...items];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  return shuffled;
+}
+
+function getStandardCategory(eventType: EventType): MatchCategory {
+  return eventType === 'DOUBLES' ? 'STANDARD_DOUBLES' : 'STANDARD_SINGLES';
+}
+
+function seedNameMap(entries: EntryPlan[]) {
+  return new Map(entries.map((entry) => [entry.seed, entry.entryName]));
+}
+
+function formatSeedNames(seeds: number[] | undefined, entryNames: Map<number, string>) {
+  if (!seeds?.length) {
+    return undefined;
+  }
+
+  return seeds.map((seed) => entryNames.get(seed) ?? `Seed ${seed}`).join(' / ');
+}
+
 export function buildKnockoutPlan(
   participants: ParticipantSeed[],
   customLabels: string[] = [],
+  matchFormat: MatchFormat = 'BEST_OF_3',
+  eventType: EventType = 'SINGLES',
 ) {
   const bracketSize = nextPowerOfTwo(participants.length);
   const roundLabels = createRoundLabels(bracketSize, customLabels);
@@ -112,7 +186,7 @@ export function buildKnockoutPlan(
     const participant = participants[index];
     return {
       seed: index + 1,
-      entryName: participant?.displayName ?? '轮空',
+      entryName: participant?.displayName ?? 'BYE',
       participantType: participant?.participantType ?? 'PLAYER',
       playerId: participant?.playerId,
       teamId: participant?.teamId,
@@ -121,31 +195,33 @@ export function buildKnockoutPlan(
     };
   });
 
+  const entryNames = seedNameMap(entries);
   const matches: MatchPlan[] = [];
   let displayOrder = 1;
 
-  const firstRoundMatchCount = bracketSize / 2;
-  for (let matchIndex = 0; matchIndex < firstRoundMatchCount; matchIndex += 1) {
+  for (let matchIndex = 0; matchIndex < bracketSize / 2; matchIndex += 1) {
     const entryA = entries[matchIndex * 2];
     const entryB = entries[matchIndex * 2 + 1];
-
     const match: MatchPlan = {
       stage: 'KNOCKOUT',
       status: 'PENDING',
       roundNumber: 1,
-      roundLabel: roundLabels[0] ?? '首轮',
+      roundLabel: roundLabels[0] ?? 'Opening Round',
       matchNumber: matchIndex + 1,
       displayOrder,
-      participantASeed: entryA.isBye ? undefined : entryA.seed,
+      participantASeeds: entryA.isBye ? undefined : [entryA.seed],
       participantAName: entryA.isBye ? undefined : entryA.entryName,
-      participantBSeed: entryB.isBye ? undefined : entryB.seed,
+      participantBSeeds: entryB.isBye ? undefined : [entryB.seed],
       participantBName: entryB.isBye ? undefined : entryB.entryName,
+      matchFormat,
+      matchCategory: getStandardCategory(eventType),
     };
 
     if (entryA.isBye !== entryB.isBye) {
       match.status = 'COMPLETED';
       match.score = 'BYE';
-      match.winnerSeed = entryA.isBye ? entryB.seed : entryA.seed;
+      match.winnerSeeds = entryA.isBye ? [entryB.seed] : [entryA.seed];
+      match.winnerSide = entryA.isBye ? 'B' : 'A';
     }
 
     matches.push(match);
@@ -154,10 +230,9 @@ export function buildKnockoutPlan(
 
   let previousRoundMatches = matches.filter((match) => match.roundNumber === 1);
   for (let roundNumber = 2; roundNumber <= roundLabels.length; roundNumber += 1) {
-    const currentRoundMatchCount = previousRoundMatches.length / 2;
     const currentRoundMatches: MatchPlan[] = [];
 
-    for (let matchIndex = 0; matchIndex < currentRoundMatchCount; matchIndex += 1) {
+    for (let matchIndex = 0; matchIndex < previousRoundMatches.length / 2; matchIndex += 1) {
       const feederA = previousRoundMatches[matchIndex * 2];
       const feederB = previousRoundMatches[matchIndex * 2 + 1];
 
@@ -165,17 +240,15 @@ export function buildKnockoutPlan(
         stage: 'KNOCKOUT',
         status: 'PENDING',
         roundNumber,
-        roundLabel: roundLabels[roundNumber - 1] ?? `第 ${roundNumber} 轮`,
+        roundLabel: roundLabels[roundNumber - 1] ?? `Round ${roundNumber}`,
         matchNumber: matchIndex + 1,
         displayOrder,
-        participantASeed: feederA?.winnerSeed,
-        participantAName: feederA?.winnerSeed
-          ? entries.find((entry) => entry.seed === feederA.winnerSeed)?.entryName
-          : undefined,
-        participantBSeed: feederB?.winnerSeed,
-        participantBName: feederB?.winnerSeed
-          ? entries.find((entry) => entry.seed === feederB.winnerSeed)?.entryName
-          : undefined,
+        participantASeeds: feederA.winnerSeeds,
+        participantAName: formatSeedNames(feederA.winnerSeeds, entryNames),
+        participantBSeeds: feederB.winnerSeeds,
+        participantBName: formatSeedNames(feederB.winnerSeeds, entryNames),
+        matchFormat,
+        matchCategory: getStandardCategory(eventType),
       });
 
       displayOrder += 1;
@@ -196,6 +269,8 @@ export function buildKnockoutPlan(
 export function buildRoundRobinPlan(
   participants: ParticipantSeed[],
   groupCount: number,
+  matchFormat: MatchFormat = 'BEST_OF_3',
+  eventType: EventType = 'SINGLES',
 ) {
   const safeGroupCount = Math.max(1, Math.min(groupCount, participants.length));
   const groupNames = Array.from({ length: safeGroupCount }, (_, index) =>
@@ -203,9 +278,7 @@ export function buildRoundRobinPlan(
   );
 
   const groups = new Map<string, ParticipantSeed[]>();
-  for (const groupName of groupNames) {
-    groups.set(groupName, []);
-  }
+  groupNames.forEach((groupName) => groups.set(groupName, []));
 
   participants.forEach((participant, index) => {
     const groupName = groupNames[index % safeGroupCount];
@@ -215,12 +288,11 @@ export function buildRoundRobinPlan(
   let seed = 1;
   const entries: EntryPlan[] = [];
   const matches: MatchPlan[] = [];
-  const seedByName = new Map<string, number>();
 
   for (const groupName of groupNames) {
     const members = groups.get(groupName) ?? [];
     members.forEach((participant, index) => {
-      const entry: EntryPlan = {
+      entries.push({
         seed,
         entryName: participant.displayName,
         participantType: participant.participantType,
@@ -229,10 +301,7 @@ export function buildRoundRobinPlan(
         groupName,
         slotNumber: index + 1,
         isBye: false,
-      };
-
-      entries.push(entry);
-      seedByName.set(participant.displayName, seed);
+      });
       seed += 1;
     });
   }
@@ -240,23 +309,25 @@ export function buildRoundRobinPlan(
   let matchNumber = 1;
   for (const groupName of groupNames) {
     const groupEntries = entries.filter((entry) => entry.groupName === groupName);
-    for (let i = 0; i < groupEntries.length; i += 1) {
-      for (let j = i + 1; j < groupEntries.length; j += 1) {
-        const entryA = groupEntries[i];
-        const entryB = groupEntries[j];
+    for (let indexA = 0; indexA < groupEntries.length; indexA += 1) {
+      for (let indexB = indexA + 1; indexB < groupEntries.length; indexB += 1) {
+        const entryA = groupEntries[indexA];
+        const entryB = groupEntries[indexB];
 
         matches.push({
           stage: 'GROUP',
           status: 'PENDING',
           roundNumber: 1,
-          roundLabel: `${groupName}组`,
+          roundLabel: `Group ${groupName}`,
           matchNumber,
           displayOrder: matchNumber,
           groupName,
-          participantASeed: entryA.seed,
+          participantASeeds: [entryA.seed],
           participantAName: entryA.entryName,
-          participantBSeed: entryB.seed,
+          participantBSeeds: [entryB.seed],
           participantBName: entryB.entryName,
+          matchFormat,
+          matchCategory: getStandardCategory(eventType),
         });
 
         matchNumber += 1;
@@ -268,6 +339,198 @@ export function buildRoundRobinPlan(
     groupNames,
     entries,
     matches,
+  };
+}
+
+export function buildTeamBattlePlan(
+  participants: ParticipantSeed[],
+  teamCount: number,
+  teamSize: number,
+  teamLabels: string[],
+  matchFormat: MatchFormat = 'BEST_OF_3',
+) {
+  if (teamCount !== 2) {
+    throw new Error('Current team battle implementation supports exactly 2 teams.');
+  }
+
+  if (participants.length !== teamCount * teamSize) {
+    throw new Error('Selected players must exactly match teamCount x teamSize.');
+  }
+
+  if (teamSize < 2 || teamSize % 2 !== 0) {
+    throw new Error('Team battle currently requires an even team size of at least 2.');
+  }
+
+  const resolvedLabels =
+    teamLabels.filter((label) => label.trim()).length === teamCount
+      ? teamLabels.map((label) => label.trim())
+      : Array.from({ length: teamCount }, (_, index) => `Team ${String.fromCharCode(65 + index)}`);
+
+  const entries: EntryPlan[] = [];
+  const teamBuckets: EntryPlan[][] = [];
+  let seed = 1;
+
+  for (let teamIndex = 0; teamIndex < teamCount; teamIndex += 1) {
+    const label = resolvedLabels[teamIndex];
+    const members = participants.slice(teamIndex * teamSize, (teamIndex + 1) * teamSize);
+    const teamEntries = members.map((participant, memberIndex) => ({
+      seed: seed + memberIndex,
+      entryName: participant.displayName,
+      participantType: 'PLAYER' as const,
+      playerId: participant.playerId,
+      groupName: label,
+      slotNumber: memberIndex + 1,
+      isBye: false,
+      teamOrder: memberIndex + 1,
+    }));
+
+    entries.push(...teamEntries);
+    teamBuckets.push(teamEntries);
+    seed += teamEntries.length;
+  }
+
+  const [teamA, teamB] = teamBuckets;
+  const matches: MatchPlan[] = [];
+  let displayOrder = 1;
+
+  for (let index = 0; index < teamSize; index += 1) {
+    matches.push({
+      stage: 'TEAM_BATTLE',
+      status: 'PENDING',
+      roundNumber: 1,
+      roundLabel: 'Team Singles',
+      matchNumber: displayOrder,
+      displayOrder,
+      groupName: 'Singles',
+      participantASeeds: [teamA[index].seed],
+      participantAName: `${teamA[index].entryName} (#${teamA[index].teamOrder})`,
+      participantBSeeds: [teamB[index].seed],
+      participantBName: `${teamB[index].entryName} (#${teamB[index].teamOrder})`,
+      matchFormat,
+      matchCategory: 'TEAM_SINGLES',
+      participantATeamLabel: resolvedLabels[0],
+      participantBTeamLabel: resolvedLabels[1],
+    });
+    displayOrder += 1;
+  }
+
+  const pairCount = teamSize / 2;
+  for (let index = 0; index < pairCount; index += 1) {
+    const participantASeeds = [teamA[index].seed, teamA[index + pairCount].seed];
+    const participantBSeeds = [teamB[index].seed, teamB[index + pairCount].seed];
+
+    matches.push({
+      stage: 'TEAM_BATTLE',
+      status: 'PENDING',
+      roundNumber: 2,
+      roundLabel: 'Team Doubles',
+      matchNumber: displayOrder,
+      displayOrder,
+      groupName: 'Doubles',
+      participantASeeds,
+      participantAName: `${teamA[index].entryName} / ${teamA[index + pairCount].entryName}`,
+      participantBSeeds,
+      participantBName: `${teamB[index].entryName} / ${teamB[index + pairCount].entryName}`,
+      matchFormat,
+      matchCategory: 'TEAM_DOUBLES',
+      participantATeamLabel: resolvedLabels[0],
+      participantBTeamLabel: resolvedLabels[1],
+    });
+    displayOrder += 1;
+  }
+
+  return {
+    teamLabels: resolvedLabels,
+    entries,
+    matches,
+  };
+}
+
+function normalizeSetValue(value: string | number | null | undefined) {
+  if (value === '' || value === null || value === undefined) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+export function buildScoreSummary(
+  participantAScores: Array<number | null | undefined>,
+  participantBScores: Array<number | null | undefined>,
+) {
+  return participantAScores
+    .map((scoreA, index) => {
+      const scoreB = participantBScores[index];
+      if (scoreA === null || scoreA === undefined || scoreB === null || scoreB === undefined) {
+        return null;
+      }
+      return `${scoreA}-${scoreB}`;
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+export function evaluateMatchScore(
+  participantAInputs: Array<string | number | null | undefined>,
+  participantBInputs: Array<string | number | null | undefined>,
+  matchFormat: MatchFormat,
+): EvaluatedMatchScore | null {
+  const bestOf = getBestOf(matchFormat);
+  const requiredSetWins = getRequiredSetWins(matchFormat);
+
+  const participantAScores: number[] = [];
+  const participantBScores: number[] = [];
+  let setsA = 0;
+  let setsB = 0;
+  let gamesA = 0;
+  let gamesB = 0;
+
+  for (let index = 0; index < bestOf; index += 1) {
+    const scoreA = normalizeSetValue(participantAInputs[index]);
+    const scoreB = normalizeSetValue(participantBInputs[index]);
+
+    if (scoreA === null && scoreB === null) {
+      continue;
+    }
+
+    if (scoreA === null || scoreB === null || scoreA === scoreB) {
+      return null;
+    }
+
+    if (setsA >= requiredSetWins || setsB >= requiredSetWins) {
+      return null;
+    }
+
+    participantAScores.push(scoreA);
+    participantBScores.push(scoreB);
+    gamesA += scoreA;
+    gamesB += scoreB;
+
+    if (scoreA > scoreB) {
+      setsA += 1;
+    } else {
+      setsB += 1;
+    }
+  }
+
+  if (setsA < requiredSetWins && setsB < requiredSetWins) {
+    return null;
+  }
+
+  return {
+    participantAScores,
+    participantBScores,
+    setsA,
+    setsB,
+    gamesA,
+    gamesB,
+    winner: setsA > setsB ? 'A' : 'B',
+    summary: buildScoreSummary(participantAScores, participantBScores),
   };
 }
 
@@ -322,13 +585,47 @@ export function parseScore(scoreText: string): ParsedScore | null {
   };
 }
 
+function extractScoreInfo(match: {
+  participantAScores?: Array<number | null | undefined> | null;
+  participantBScores?: Array<number | null | undefined> | null;
+  score?: string | null;
+}) {
+  const participantAScores = (match.participantAScores ?? []).filter(
+    (value): value is number => typeof value === 'number',
+  );
+  const participantBScores = (match.participantBScores ?? []).filter(
+    (value): value is number => typeof value === 'number',
+  );
+
+  if (participantAScores.length && participantAScores.length === participantBScores.length) {
+    return evaluateMatchScore(participantAScores, participantBScores, 'BEST_OF_5');
+  }
+
+  if (match.score) {
+    const parsed = parseScore(match.score);
+    if (!parsed) {
+      return null;
+    }
+    return {
+      ...parsed,
+      participantAScores: [],
+      participantBScores: [],
+      summary: match.score,
+    };
+  }
+
+  return null;
+}
+
 export function calculateGroupStandings<
-  TEntry extends { id: string; entryName: string; groupName?: string | null },
+  TEntry extends { id: string; entryName?: string | null; groupName?: string | null },
   TMatch extends {
     groupName?: string | null;
     status?: string | null;
     participantAEntryId?: string | null;
     participantBEntryId?: string | null;
+    participantAScores?: Array<number | null | undefined> | null;
+    participantBScores?: Array<number | null | undefined> | null;
     score?: string | null;
     winnerEntryId?: string | null;
   },
@@ -336,7 +633,7 @@ export function calculateGroupStandings<
   const groups = new Map<string, StandingAccumulator[]>();
 
   for (const entry of entries) {
-    if (!entry.groupName) {
+    if (!entry.groupName || !entry.entryName) {
       continue;
     }
 
@@ -372,7 +669,7 @@ export function calculateGroupStandings<
 
     const entryA = standings.find((item) => item.entryId === match.participantAEntryId);
     const entryB = standings.find((item) => item.entryId === match.participantBEntryId);
-    const parsedScore = match.score ? parseScore(match.score) : null;
+    const parsedScore = extractScoreInfo(match);
 
     if (!entryA || !entryB || !parsedScore) {
       continue;
@@ -402,10 +699,10 @@ export function calculateGroupStandings<
         return pointDiff;
       }
 
-      const netGameDiff =
-        right.gamesWon - right.gamesLost - (left.gamesWon - left.gamesLost);
-      if (netGameDiff !== 0) {
-        return netGameDiff;
+      const rightNet = right.gamesWon - right.gamesLost;
+      const leftNet = left.gamesWon - left.gamesLost;
+      if (rightNet !== leftNet) {
+        return rightNet - leftNet;
       }
 
       const totalGamesDiff = right.gamesWon - left.gamesWon;
@@ -413,22 +710,95 @@ export function calculateGroupStandings<
         return totalGamesDiff;
       }
 
-      return left.entryName.localeCompare(right.entryName, 'zh-Hans-CN');
+      return left.entryName.localeCompare(right.entryName, 'en');
     }),
   }));
 }
 
+export function calculateTeamBattleSummary<
+  TMatch extends {
+    matchCategory?: string | null;
+    participantATeamLabel?: string | null;
+    participantBTeamLabel?: string | null;
+    status?: string | null;
+    winnerSide?: WinnerSide | null;
+    participantAScores?: Array<number | null | undefined> | null;
+    participantBScores?: Array<number | null | undefined> | null;
+    score?: string | null;
+  },
+>(matches: TMatch[]) {
+  const summary = new Map<string, TeamBattleAccumulator>();
+
+  for (const match of matches) {
+    const teamA = match.participantATeamLabel || 'Team A';
+    const teamB = match.participantBTeamLabel || 'Team B';
+
+    if (!summary.has(teamA)) {
+      summary.set(teamA, { teamLabel: teamA, matchWins: 0, gamesWon: 0, gamesLost: 0 });
+    }
+    if (!summary.has(teamB)) {
+      summary.set(teamB, { teamLabel: teamB, matchWins: 0, gamesWon: 0, gamesLost: 0 });
+    }
+
+    const teamSummaryA = summary.get(teamA)!;
+    const teamSummaryB = summary.get(teamB)!;
+    const parsedScore = extractScoreInfo(match);
+
+    if (parsedScore) {
+      teamSummaryA.gamesWon += parsedScore.gamesA;
+      teamSummaryA.gamesLost += parsedScore.gamesB;
+      teamSummaryB.gamesWon += parsedScore.gamesB;
+      teamSummaryB.gamesLost += parsedScore.gamesA;
+    }
+
+    if (match.status === 'COMPLETED' && match.winnerSide) {
+      if (match.winnerSide === 'A') {
+        teamSummaryA.matchWins += 1;
+      } else {
+        teamSummaryB.matchWins += 1;
+      }
+    }
+  }
+
+  const teams = Array.from(summary.values()).sort((left, right) =>
+    left.teamLabel.localeCompare(right.teamLabel, 'en'),
+  );
+
+  const winner = [...teams].sort((left, right) => {
+    const matchWinDiff = right.matchWins - left.matchWins;
+    if (matchWinDiff !== 0) {
+      return matchWinDiff;
+    }
+
+    const gameDiff =
+      right.gamesWon - right.gamesLost - (left.gamesWon - left.gamesLost);
+    if (gameDiff !== 0) {
+      return gameDiff;
+    }
+
+    return right.gamesWon - left.gamesWon;
+  })[0];
+
+  return {
+    teams,
+    winner,
+  };
+}
+
 export function formatRoundRobinMatrix<
-  TEntry extends { id: string; entryName: string; groupName?: string | null },
+  TEntry extends { id: string; entryName?: string | null; groupName?: string | null },
   TMatch extends {
     groupName?: string | null;
     participantAEntryId?: string | null;
     participantBEntryId?: string | null;
+    participantAScores?: Array<number | null | undefined> | null;
+    participantBScores?: Array<number | null | undefined> | null;
     score?: string | null;
-    winnerEntryId?: string | null;
   },
 >(entries: TEntry[], matches: TMatch[], groupName: string) {
-  const groupEntries = entries.filter((entry) => entry.groupName === groupName);
+  const groupEntries = entries.filter(
+    (entry) => entry.groupName === groupName && entry.entryName,
+  );
 
   return groupEntries.map((rowEntry) => ({
     entry: rowEntry,
@@ -447,18 +817,23 @@ export function formatRoundRobinMatrix<
       );
 
       if (!match) {
-        return '待赛';
+        return 'Pending';
       }
 
-      if (!match.score) {
-        return '待录入';
+      const scoreSummary =
+        buildScoreSummary(match.participantAScores ?? [], match.participantBScores ?? []) ||
+        match.score ||
+        '';
+
+      if (!scoreSummary) {
+        return 'Score pending';
       }
 
       if (match.participantAEntryId === rowEntry.id) {
-        return match.score;
+        return scoreSummary;
       }
 
-      return reverseScore(match.score);
+      return reverseScore(scoreSummary);
     }),
   }));
 }

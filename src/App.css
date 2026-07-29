@@ -32,15 +32,18 @@
 .section-heading h2,
 .tournament-card h3,
 .panel-form h3,
+.panel-info h3,
 .group-card h4,
 .round-column h4,
-.history-list h4 {
+.history-list h4,
+.team-preview-card h4,
+.team-summary-card h4 {
   margin: 0;
 }
 
 .hero-copy,
 .section-desc {
-  max-width: 64ch;
+  max-width: 68ch;
   line-height: 1.7;
   color: rgba(248, 250, 252, 0.85);
 }
@@ -75,7 +78,7 @@
   padding: 24px;
   border: 1px solid #d7e2dc;
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 16px 40px rgba(15, 23, 42, 0.06);
 }
 
@@ -100,6 +103,10 @@
   text-align: center;
 }
 
+.compact-empty {
+  padding: 18px;
+}
+
 .tournament-grid,
 .admin-grid {
   display: grid;
@@ -107,13 +114,16 @@
 }
 
 .tournament-grid {
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
 }
 
 .tournament-card,
 .group-card,
 .panel-form,
-.panel-info {
+.panel-info,
+.team-preview-card,
+.team-summary-card,
+.team-submatch-card {
   border: 1px solid #dbe6df;
   border-radius: 20px;
   background: #ffffff;
@@ -130,7 +140,8 @@
 .card-head,
 .group-head,
 .admin-topbar,
-.admin-list-item {
+.admin-list-item,
+.team-submatch-head {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -164,18 +175,25 @@
 
 .bracket-rounds {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 14px;
 }
 
-.round-column {
+.round-column,
+.history-list,
+.group-layout,
+.admin-console,
+.admin-auth-layout,
+.team-battle-layout,
+.team-submatch-list {
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 
-.match-box {
+.match-box,
+.team-submatch-card {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   padding: 14px;
   border-radius: 16px;
   border: 1px solid #d8e4db;
@@ -186,23 +204,93 @@
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 12px;
-  border-radius: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 14px;
   background: #ffffff;
   border: 1px solid #e4ece7;
 }
 
-.match-foot {
-  font-size: 13px;
-  color: #4b5563;
+.winner-row {
+  border-color: rgba(22, 163, 74, 0.45);
+  background: linear-gradient(135deg, rgba(220, 252, 231, 0.88), #ffffff);
 }
 
-.group-layout,
-.history-list,
-.admin-console,
-.admin-auth-layout {
+.champion-row {
+  box-shadow: inset 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+.participant-meta {
   display: grid;
-  gap: 16px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.participant-name {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.participant-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inline-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.winner-badge {
+  background: rgba(22, 163, 74, 0.12);
+  color: #166534;
+}
+
+.champion-badge {
+  background: rgba(250, 204, 21, 0.18);
+  color: #a16207;
+}
+
+.runnerup-badge {
+  background: rgba(148, 163, 184, 0.2);
+  color: #475569;
+}
+
+.set-score-strip {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.set-score-cell,
+.set-score-placeholder {
+  min-width: 34px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  text-align: center;
+  font-weight: 700;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.set-score-placeholder {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.match-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: #4b5563;
 }
 
 .table-wrap {
@@ -240,10 +328,6 @@ thead th {
 .matrix-table td:first-child,
 .matrix-table th:first-child {
   text-align: left;
-}
-
-.history-list {
-  padding-top: 4px;
 }
 
 .history-item {
@@ -315,7 +399,9 @@ thead th {
 }
 
 .panel-form,
-.panel-info {
+.panel-info,
+.team-preview-card,
+.team-summary-card {
   display: grid;
   gap: 14px;
   padding: 20px;
@@ -376,7 +462,7 @@ thead th {
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -388,9 +474,24 @@ thead th {
   padding: 14px;
   border: 1px solid #dbe6df;
   border-radius: 16px;
+  background: #fbfefc;
 }
 
-.participant-options {
+.participant-picker-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.picker-hint {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.participant-options,
+.selected-order-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -404,6 +505,132 @@ thead th {
   border: 1px solid #d6e2da;
   border-radius: 999px;
   background: #f8fbf9;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.checkbox-chip-active {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(239, 246, 255, 0.95);
+}
+
+.checkbox-chip:hover {
+  transform: translateY(-1px);
+}
+
+.seed-order-badge,
+.selected-order-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.selected-order-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.team-preview-grid,
+.team-battle-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.team-preview-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.team-preview-row span {
+  color: #475569;
+  font-weight: 700;
+}
+
+.team-preview-empty {
+  margin: 0;
+  color: #64748b;
+}
+
+.team-summary-card {
+  gap: 12px;
+}
+
+.team-summary-winner {
+  border-color: rgba(22, 163, 74, 0.45);
+  background: linear-gradient(135deg, rgba(220, 252, 231, 0.9), #ffffff);
+}
+
+.team-summary-stats {
+  display: grid;
+  gap: 8px;
+  color: #334155;
+}
+
+.team-submatch-head strong {
+  font-size: 15px;
+}
+
+.team-submatch-head span {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.match-entry-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid #dbe6df;
+  background: #f8fbf9;
+}
+
+.match-entry-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.set-entry-header,
+.set-entry-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.6fr) repeat(5, minmax(56px, 72px));
+  gap: 10px;
+  align-items: center;
+}
+
+.set-entry-header {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+}
+
+.set-entry-row strong {
+  color: #0f172a;
+}
+
+.set-entry-row input {
+  padding: 10px 8px;
+  text-align: center;
 }
 
 .admin-list {
@@ -418,17 +645,32 @@ thead th {
   background: #f8fafc;
 }
 
-.admin-list-item p {
+.admin-list-item p,
+.entry-snapshot-row span {
   margin-top: 4px;
   color: #64748b;
   font-size: 13px;
 }
 
-@media (max-width: 1080px) {
+.entry-snapshot-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf2f7;
+}
+
+.entry-snapshot-row:last-child {
+  border-bottom: 0;
+}
+
+@media (max-width: 1180px) {
   .hero-banner,
   .admin-login-grid,
   .admin-grid,
-  .form-grid {
+  .form-grid,
+  .team-preview-grid,
+  .team-battle-summary {
     grid-template-columns: 1fr;
   }
 
@@ -438,6 +680,18 @@ thead th {
 
   .wide-field {
     grid-column: auto;
+  }
+}
+
+@media (max-width: 840px) {
+  .participant-picker-toolbar,
+  .set-entry-header,
+  .set-entry-row {
+    grid-template-columns: 1fr;
+  }
+
+  .set-entry-header {
+    display: none;
   }
 }
 
@@ -451,8 +705,20 @@ thead th {
   .group-head,
   .admin-topbar,
   .admin-list-item,
-  .history-item {
+  .history-item,
+  .team-submatch-head,
+  .match-entry-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .slot-row,
+  .entry-snapshot-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .set-score-strip {
+    justify-content: flex-start;
   }
 }

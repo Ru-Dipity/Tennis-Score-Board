@@ -13,10 +13,19 @@ import './App.css';
 import {
   buildKnockoutPlan,
   buildRoundRobinPlan,
+  buildTeamBattlePlan,
   calculateGroupStandings,
+  calculateTeamBattleSummary,
+  createEmptyScoreInputs,
+  evaluateMatchScore,
   formatRoundRobinMatrix,
-  parseScore,
+  getBestOf,
+  shuffleSelectedParticipants,
+  type EventType,
+  type MatchFormat,
   type ParticipantSeed,
+  type TournamentMode,
+  type WinnerSide,
 } from './lib/tournament';
 
 const client = generateClient<Schema>();
@@ -27,8 +36,6 @@ type Tournament = any;
 type TournamentEntry = any;
 type Match = any;
 type Gender = 'MALE' | 'FEMALE' | 'MIXED' | 'UNSPECIFIED';
-type TournamentMode = 'KNOCKOUT' | 'ROUND_ROBIN';
-type EventType = 'SINGLES' | 'DOUBLES';
 
 const ADMIN_GROUP = 'admin';
 
@@ -40,44 +47,87 @@ function isAmplifyListItem<T>(value: T | null | undefined): value is T {
   return Boolean(value);
 }
 
+function getModeLabel(mode: TournamentMode) {
+  if (mode === 'TEAM_BATTLE') {
+    return 'Team Battle';
+  }
+  return mode === 'KNOCKOUT' ? 'Knockout' : 'Round Robin';
+}
+
+function getEventTypeLabel(eventType: EventType) {
+  if (eventType === 'TEAM') {
+    return 'Team Event';
+  }
+  return eventType === 'DOUBLES' ? 'Doubles' : 'Singles';
+}
+
+function getMatchFormatLabel(matchFormat: MatchFormat) {
+  if (matchFormat === 'BEST_OF_5') {
+    return 'Best of 5';
+  }
+  if (matchFormat === 'BEST_OF_3') {
+    return 'Best of 3';
+  }
+  return 'Single Set';
+}
+
 function optionLabelForEntry(
   entry: TournamentEntry,
   playerMap: Map<string, Player>,
   teamMap: Map<string, Team>,
 ) {
   if (entry.teamId) {
-    const team = teamMap.get(entry.teamId);
-    if (team?.name) {
-      return team.name;
-    }
+    return teamMap.get(entry.teamId)?.name ?? entry.entryName;
   }
 
   if (entry.playerId) {
-    const player = playerMap.get(entry.playerId);
-    if (player?.name) {
-      return player.name;
-    }
+    return playerMap.get(entry.playerId)?.name ?? entry.entryName;
   }
 
   return entry.entryName;
 }
 
-function displayMatchScore(match: Match) {
-  if (match.status === 'COMPLETED' && match.score === 'BYE') {
-    return '轮空自动晋级';
+function getScoreList(match: Match, side: WinnerSide) {
+  const values =
+    side === 'A' ? match.participantAScores ?? [] : match.participantBScores ?? [];
+  return values.filter((value: unknown): value is number => typeof value === 'number');
+}
+
+function isSideWinner(match: Match, side: WinnerSide) {
+  if (match.winnerSide) {
+    return match.winnerSide === side;
   }
 
-  return match.score || '待录入';
+  if (match.winnerEntryId) {
+    const target = side === 'A' ? match.participantAEntryId : match.participantBEntryId;
+    return target === match.winnerEntryId;
+  }
+
+  return false;
+}
+
+function getFinalMatch(tournamentMatches: Match[]) {
+  return [...tournamentMatches]
+    .filter((match) => match.stage === 'KNOCKOUT')
+    .sort((left, right) => {
+      const roundDiff = right.roundNumber - left.roundNumber;
+      if (roundDiff !== 0) {
+        return roundDiff;
+      }
+      return right.matchNumber - left.matchNumber;
+    })[0];
 }
 
 function groupKnockoutRounds(tournamentMatches: Match[]) {
   const roundMap = new Map<number, Match[]>();
 
-  tournamentMatches.forEach((match) => {
-    const bucket = roundMap.get(match.roundNumber) ?? [];
-    bucket.push(match);
-    roundMap.set(match.roundNumber, bucket);
-  });
+  tournamentMatches
+    .filter((match) => match.stage === 'KNOCKOUT')
+    .forEach((match) => {
+      const bucket = roundMap.get(match.roundNumber) ?? [];
+      bucket.push(match);
+      roundMap.set(match.roundNumber, bucket);
+    });
 
   return Array.from(roundMap.entries()).sort(([left], [right]) => left - right);
 }
@@ -108,15 +158,20 @@ function App() {
     name: '',
     mode: 'KNOCKOUT' as TournamentMode,
     eventType: 'SINGLES' as EventType,
+    matchFormat: 'BEST_OF_3' as MatchFormat,
     selectedParticipantIds: [] as string[],
     groupCount: 2,
     qualifyPerGroup: 2,
     customRoundLabels: '',
+    teamCount: 2,
+    teamSize: 4,
+    teamALabel: 'Team A',
+    teamBLabel: 'Team B',
   });
   const [matchForm, setMatchForm] = useState({
     matchId: '',
-    winnerEntryId: '',
-    score: '',
+    participantAScores: createEmptyScoreInputs('BEST_OF_3'),
+    participantBScores: createEmptyScoreInputs('BEST_OF_3'),
   });
   const [statusMessage, setStatusMessage] = useState('');
   const [saving, setSaving] = useState(false);
@@ -151,14 +206,6 @@ function App() {
     void checkAdminSession();
   }, []);
 
-  const activeTournaments = useMemo(
-    () =>
-      [...tournaments]
-        .filter((item) => item.status !== 'DRAFT')
-        .sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN')),
-    [tournaments],
-  );
-
   const playerMap = useMemo(
     () => new Map(players.map((player) => [player.id, player])),
     [players],
@@ -166,6 +213,68 @@ function App() {
   const teamMap = useMemo(
     () => new Map(teams.map((team) => [team.id, team])),
     [teams],
+  );
+
+  const availableParticipantOptions = useMemo(() => {
+    if (tournamentForm.eventType === 'DOUBLES') {
+      return teams;
+    }
+    return players.filter((player) => player.isActive);
+  }, [players, teams, tournamentForm.eventType]);
+
+  const selectedParticipants = useMemo(
+    () =>
+      tournamentForm.selectedParticipantIds
+        .map((id, index) => {
+          const entity =
+            tournamentForm.eventType === 'DOUBLES' ? teamMap.get(id) : playerMap.get(id);
+          if (!entity) {
+            return null;
+          }
+
+          return {
+            id,
+            name: entity.name,
+            order: index + 1,
+          };
+        })
+        .filter(isAmplifyListItem),
+    [playerMap, teamMap, tournamentForm.eventType, tournamentForm.selectedParticipantIds],
+  );
+
+  const selectedOrderMap = useMemo(
+    () => new Map(selectedParticipants.map((participant) => [participant.id, participant.order])),
+    [selectedParticipants],
+  );
+
+  const teamBattlePreview = useMemo(() => {
+    if (tournamentForm.mode !== 'TEAM_BATTLE' && tournamentForm.eventType !== 'TEAM') {
+      return [];
+    }
+
+    const labels = [tournamentForm.teamALabel.trim() || 'Team A', tournamentForm.teamBLabel.trim() || 'Team B'];
+    return labels.map((label, teamIndex) => ({
+      label,
+      members: selectedParticipants.slice(
+        teamIndex * tournamentForm.teamSize,
+        (teamIndex + 1) * tournamentForm.teamSize,
+      ),
+    }));
+  }, [
+    selectedParticipants,
+    tournamentForm.eventType,
+    tournamentForm.mode,
+    tournamentForm.teamALabel,
+    tournamentForm.teamBLabel,
+    tournamentForm.teamSize,
+  ]);
+
+  const activeTournaments = useMemo(
+    () =>
+      [...tournaments]
+        .filter((item) => item.status !== 'DRAFT')
+        .sort((left, right) => left.name.localeCompare(right.name, 'en')),
+    [tournaments],
   );
 
   const tournamentCards = useMemo(
@@ -178,16 +287,18 @@ function App() {
           .filter((match) => match.tournamentId === tournament.id)
           .sort((left, right) => left.displayOrder - right.displayOrder);
 
-        const standings =
-          tournament.mode === 'ROUND_ROBIN'
-            ? calculateGroupStandings(tournamentEntries as any[], tournamentMatches as any[])
-            : [];
-
         return {
           tournament,
           entries: tournamentEntries,
           matches: tournamentMatches,
-          standings,
+          standings:
+            tournament.mode === 'ROUND_ROBIN'
+              ? calculateGroupStandings(tournamentEntries as any[], tournamentMatches as any[])
+              : [],
+          teamSummary:
+            tournament.mode === 'TEAM_BATTLE'
+              ? calculateTeamBattleSummary(tournamentMatches as any[])
+              : null,
         };
       }),
     [activeTournaments, entries, matches],
@@ -196,7 +307,7 @@ function App() {
   const manageableTournaments = useMemo(
     () =>
       [...tournaments].sort((left, right) =>
-        left.name.localeCompare(right.name, 'zh-Hans-CN'),
+        left.name.localeCompare(right.name, 'en'),
       ),
     [tournaments],
   );
@@ -204,14 +315,27 @@ function App() {
   const editableMatches = useMemo(
     () =>
       [...matches]
-        .filter(
-          (match) =>
-            match.status !== 'COMPLETED' ||
-            (match.participantAEntryId && match.participantBEntryId),
-        )
+        .filter((match) => match.status !== 'COMPLETED')
         .sort((left, right) => left.displayOrder - right.displayOrder),
     [matches],
   );
+
+  const selectedMatch = useMemo(
+    () => matches.find((match) => match.id === matchForm.matchId),
+    [matchForm.matchId, matches],
+  );
+
+  const selectedMatchTournament = useMemo(
+    () =>
+      selectedMatch
+        ? tournaments.find((tournament) => tournament.id === selectedMatch.tournamentId)
+        : null,
+    [selectedMatch, tournaments],
+  );
+
+  const selectedMatchFormat = (selectedMatch?.matchFormat ||
+    selectedMatchTournament?.matchFormat ||
+    'BEST_OF_3') as MatchFormat;
 
   async function checkAdminSession() {
     try {
@@ -221,11 +345,7 @@ function App() {
         (session.tokens?.idToken?.payload['cognito:groups'] as string[] | undefined) ??
         [];
       setIsAdmin(groups.includes(ADMIN_GROUP));
-      if (!groups.includes(ADMIN_GROUP)) {
-        setAuthError('当前账号已登录，但未加入 admin 用户组。');
-      } else {
-        setAuthError('');
-      }
+      setAuthError(groups.includes(ADMIN_GROUP) ? '' : 'The current account is not in the admin group.');
     } catch {
       setIsAdmin(false);
     } finally {
@@ -244,7 +364,7 @@ function App() {
       await checkAdminSession();
       setAdminLogin({ email: '', password: '' });
     } catch (error) {
-      const message = error instanceof Error ? error.message : '登录失败，请检查账号密码。';
+      const message = error instanceof Error ? error.message : 'Failed to sign in.';
       setAuthError(message);
     }
   }
@@ -253,6 +373,31 @@ function App() {
     await signOut();
     setIsAdmin(false);
     setAuthView('visitor');
+  }
+
+  function updateTournamentMode(nextEventType: EventType) {
+    setTournamentForm((current) => ({
+      ...current,
+      eventType: nextEventType,
+      mode: nextEventType === 'TEAM' ? 'TEAM_BATTLE' : current.mode === 'TEAM_BATTLE' ? 'KNOCKOUT' : current.mode,
+      selectedParticipantIds: [],
+    }));
+  }
+
+  function toggleParticipantSelection(participantId: string, checked: boolean) {
+    setTournamentForm((current) => ({
+      ...current,
+      selectedParticipantIds: checked
+        ? [...current.selectedParticipantIds, participantId]
+        : current.selectedParticipantIds.filter((id) => id !== participantId),
+    }));
+  }
+
+  function handleRandomDraw() {
+    setTournamentForm((current) => ({
+      ...current,
+      selectedParticipantIds: shuffleSelectedParticipants(current.selectedParticipantIds),
+    }));
   }
 
   async function createPlayer(event: React.FormEvent<HTMLFormElement>) {
@@ -273,7 +418,7 @@ function App() {
         authModeForAdmin(true),
       );
       setPlayerForm({ name: '', gender: 'UNSPECIFIED' });
-      setStatusMessage('球员已创建。');
+      setStatusMessage('Player created successfully.');
     } finally {
       setSaving(false);
     }
@@ -286,12 +431,12 @@ function App() {
     }
 
     if (!teamForm.playerOneId || !teamForm.playerTwoId) {
-      setStatusMessage('请选择两位不同的球员组成双打队伍。');
+      setStatusMessage('Please select two different players.');
       return;
     }
 
     if (teamForm.playerOneId === teamForm.playerTwoId) {
-      setStatusMessage('双打组合不能选择同一位球员。');
+      setStatusMessage('A doubles team cannot contain the same player twice.');
       return;
     }
 
@@ -311,7 +456,7 @@ function App() {
         authModeForAdmin(true),
       );
       setTeamForm({ name: '', playerOneId: '', playerTwoId: '' });
-      setStatusMessage('双打组合已创建。');
+      setStatusMessage('Doubles team created successfully.');
     } finally {
       setSaving(false);
     }
@@ -323,50 +468,73 @@ function App() {
       return;
     }
 
-    const availableParticipants =
-      tournamentForm.eventType === 'SINGLES' ? players : teams;
+    const effectiveMode =
+      tournamentForm.eventType === 'TEAM' ? 'TEAM_BATTLE' : tournamentForm.mode;
 
-    if (tournamentForm.selectedParticipantIds.length < 2) {
-      setStatusMessage('至少选择 2 个参赛对象。');
+    if (!tournamentForm.name.trim()) {
+      setStatusMessage('Tournament name is required.');
+      return;
+    }
+
+    if (effectiveMode === 'TEAM_BATTLE') {
+      if (tournamentForm.teamCount !== 2) {
+        setStatusMessage('Current team battle mode supports exactly 2 teams.');
+        return;
+      }
+      if (tournamentForm.teamSize < 2 || tournamentForm.teamSize % 2 !== 0) {
+        setStatusMessage('Team size must be an even number and at least 2.');
+        return;
+      }
+      if (
+        tournamentForm.selectedParticipantIds.length !==
+        tournamentForm.teamCount * tournamentForm.teamSize
+      ) {
+        setStatusMessage('Please select exactly teamCount x teamSize players for team battle.');
+        return;
+      }
+    } else if (tournamentForm.selectedParticipantIds.length < 2) {
+      setStatusMessage('Please select at least 2 participants.');
       return;
     }
 
     const participantSeeds: ParticipantSeed[] = tournamentForm.selectedParticipantIds
-      .map((id) => {
-        if (tournamentForm.eventType === 'SINGLES') {
-          const player = playerMap.get(id);
-          if (!player) {
+      .map((id, index) => {
+        if (tournamentForm.eventType === 'DOUBLES') {
+          const team = teamMap.get(id);
+          if (!team) {
             return null;
           }
           return {
-            sourceId: player.id,
-            displayName: player.name,
-            participantType: 'PLAYER' as const,
-            playerId: player.id,
+            sourceId: team.id,
+            displayName: team.name,
+            participantType: 'TEAM' as const,
+            teamId: team.id,
+            selectionOrder: index + 1,
           };
         }
 
-        const team = teamMap.get(id);
-        if (!team) {
+        const player = playerMap.get(id);
+        if (!player) {
           return null;
         }
         return {
-          sourceId: team.id,
-          displayName: team.name,
-          participantType: 'TEAM' as const,
-          teamId: team.id,
+          sourceId: player.id,
+          displayName: player.name,
+          participantType: 'PLAYER' as const,
+          playerId: player.id,
+          selectionOrder: index + 1,
         };
       })
       .filter(isAmplifyListItem);
 
-    if (participantSeeds.length < 2 || participantSeeds.length !== tournamentForm.selectedParticipantIds.length) {
-      setStatusMessage('有部分参赛对象无效，请重新选择。');
+    if (participantSeeds.length !== tournamentForm.selectedParticipantIds.length) {
+      setStatusMessage('Some selected participants could not be resolved. Please reselect them.');
       return;
     }
 
     const customRoundLabels = tournamentForm.customRoundLabels
       .split(',')
-      .map((item) => item.trim())
+      .map((label) => label.trim())
       .filter(Boolean);
 
     setSaving(true);
@@ -374,24 +542,45 @@ function App() {
 
     try {
       const plan =
-        tournamentForm.mode === 'KNOCKOUT'
-          ? buildKnockoutPlan(participantSeeds, customRoundLabels)
-          : buildRoundRobinPlan(participantSeeds, tournamentForm.groupCount);
+        effectiveMode === 'TEAM_BATTLE'
+          ? buildTeamBattlePlan(
+              participantSeeds,
+              tournamentForm.teamCount,
+              tournamentForm.teamSize,
+              [tournamentForm.teamALabel, tournamentForm.teamBLabel],
+              tournamentForm.matchFormat,
+            )
+          : effectiveMode === 'KNOCKOUT'
+            ? buildKnockoutPlan(
+                participantSeeds,
+                customRoundLabels,
+                tournamentForm.matchFormat,
+                tournamentForm.eventType,
+              )
+            : buildRoundRobinPlan(
+                participantSeeds,
+                tournamentForm.groupCount,
+                tournamentForm.matchFormat,
+                tournamentForm.eventType,
+              );
 
-      const isKnockout = tournamentForm.mode === 'KNOCKOUT';
       const tournamentPayload: any = {
         name: tournamentForm.name.trim(),
-        mode: tournamentForm.mode,
-        eventType: tournamentForm.eventType,
+        mode: effectiveMode,
+        eventType: tournamentForm.eventType === 'TEAM' ? 'TEAM' : tournamentForm.eventType,
         status: 'LIVE',
-        groupCount:
-          tournamentForm.mode === 'ROUND_ROBIN' ? tournamentForm.groupCount : undefined,
+        matchFormat: tournamentForm.matchFormat,
+        groupCount: effectiveMode === 'ROUND_ROBIN' ? tournamentForm.groupCount : undefined,
         qualifyPerGroup:
-          tournamentForm.mode === 'ROUND_ROBIN'
-            ? tournamentForm.qualifyPerGroup
+          effectiveMode === 'ROUND_ROBIN' ? tournamentForm.qualifyPerGroup : undefined,
+        bracketSize: effectiveMode === 'KNOCKOUT' ? (plan as any).bracketSize : undefined,
+        roundLabels: effectiveMode === 'KNOCKOUT' ? (plan as any).roundLabels : undefined,
+        teamCount: effectiveMode === 'TEAM_BATTLE' ? tournamentForm.teamCount : undefined,
+        teamSize: effectiveMode === 'TEAM_BATTLE' ? tournamentForm.teamSize : undefined,
+        teamLabels:
+          effectiveMode === 'TEAM_BATTLE'
+            ? [tournamentForm.teamALabel.trim() || 'Team A', tournamentForm.teamBLabel.trim() || 'Team B']
             : undefined,
-        bracketSize: isKnockout ? (plan as any).bracketSize : undefined,
-        roundLabels: isKnockout ? (plan as any).roundLabels : undefined,
         startedAt: new Date().toISOString(),
       };
 
@@ -401,10 +590,11 @@ function App() {
       );
 
       if (!createdTournament) {
-        throw new Error('赛事创建失败。');
+        throw new Error('Tournament creation failed.');
       }
 
       const entryIdBySeed = new Map<number, string>();
+
       for (const entry of plan.entries) {
         const payload: any = {
           tournamentId: createdTournament.id,
@@ -416,37 +606,55 @@ function App() {
           groupName: entry.groupName,
           slotNumber: entry.slotNumber,
           isBye: entry.isBye,
+          teamOrder: entry.teamOrder,
         };
+
         const { data: createdEntry } = await client.models.TournamentEntry.create(
           payload as any,
           authModeForAdmin(true),
         );
+
         if (createdEntry) {
           entryIdBySeed.set(entry.seed, createdEntry.id);
         }
       }
 
       for (const match of plan.matches) {
+        const participantAEntryIds = (match.participantASeeds ?? [])
+          .map((seed) => entryIdBySeed.get(seed))
+          .filter(isAmplifyListItem);
+        const participantBEntryIds = (match.participantBSeeds ?? [])
+          .map((seed) => entryIdBySeed.get(seed))
+          .filter(isAmplifyListItem);
+        const winnerEntryIds = (match.winnerSeeds ?? [])
+          .map((seed) => entryIdBySeed.get(seed))
+          .filter(isAmplifyListItem);
+
         const payload: any = {
           tournamentId: createdTournament.id,
           stage: match.stage,
           status: match.status,
+          matchFormat: match.matchFormat,
+          matchCategory: match.matchCategory,
           roundNumber: match.roundNumber,
           roundLabel: match.roundLabel,
           matchNumber: match.matchNumber,
           displayOrder: match.displayOrder,
           groupName: match.groupName,
-          participantAEntryId: match.participantASeed
-            ? entryIdBySeed.get(match.participantASeed)
-            : undefined,
+          participantAEntryId:
+            participantAEntryIds.length === 1 ? participantAEntryIds[0] : undefined,
+          participantAEntryIds: participantAEntryIds.length ? participantAEntryIds : undefined,
           participantAName: match.participantAName,
-          participantBEntryId: match.participantBSeed
-            ? entryIdBySeed.get(match.participantBSeed)
-            : undefined,
+          participantATeamLabel: match.participantATeamLabel,
+          participantAScores: match.participantAScores,
+          participantBEntryId:
+            participantBEntryIds.length === 1 ? participantBEntryIds[0] : undefined,
+          participantBEntryIds: participantBEntryIds.length ? participantBEntryIds : undefined,
           participantBName: match.participantBName,
-          winnerEntryId: match.winnerSeed
-            ? entryIdBySeed.get(match.winnerSeed)
-            : undefined,
+          participantBTeamLabel: match.participantBTeamLabel,
+          participantBScores: match.participantBScores,
+          winnerEntryId: winnerEntryIds.length === 1 ? winnerEntryIds[0] : undefined,
+          winnerSide: match.winnerSide,
           score: match.score,
           completedAt: match.status === 'COMPLETED' ? new Date().toISOString() : undefined,
         };
@@ -458,114 +666,79 @@ function App() {
         name: '',
         mode: 'KNOCKOUT',
         eventType: 'SINGLES',
+        matchFormat: 'BEST_OF_3',
         selectedParticipantIds: [],
         groupCount: 2,
         qualifyPerGroup: 2,
         customRoundLabels: '',
+        teamCount: 2,
+        teamSize: 4,
+        teamALabel: 'Team A',
+        teamBLabel: 'Team B',
       });
-      setStatusMessage(
-        `赛事「${createdTournament.name}」已创建，共 ${availableParticipants.length} 个可选参赛对象。`,
-      );
+      setStatusMessage(`Tournament "${createdTournament.name}" was created successfully.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '创建赛事失败。';
+      const message = error instanceof Error ? error.message : 'Tournament creation failed.';
       setStatusMessage(message);
     } finally {
       setSaving(false);
     }
   }
 
-  async function recordMatch(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!isAdmin || !matchForm.matchId || !matchForm.winnerEntryId || !matchForm.score.trim()) {
-      return;
-    }
+  function hydrateScoreInputs(scoreValues: number[] | undefined, matchFormat: MatchFormat) {
+    const inputs = createEmptyScoreInputs(matchFormat);
+    (scoreValues ?? []).forEach((value, index) => {
+      if (index < inputs.length) {
+        inputs[index] = String(value);
+      }
+    });
+    return inputs;
+  }
 
-    const match = matches.find((item) => item.id === matchForm.matchId);
-    if (!match) {
-      setStatusMessage('未找到待更新的比赛。');
-      return;
-    }
+  function handleMatchSelection(matchId: string) {
+    const match = matches.find((item) => item.id === matchId);
+    const matchFormat = (match?.matchFormat || 'BEST_OF_3') as MatchFormat;
 
-    const parsedScore = parseScore(matchForm.score);
-    if (!parsedScore) {
-      setStatusMessage('比分格式无效，请使用 6-4, 3-6, 10-8 这种格式。');
-      return;
-    }
+    setMatchForm({
+      matchId,
+      participantAScores: hydrateScoreInputs(match?.participantAScores, matchFormat),
+      participantBScores: hydrateScoreInputs(match?.participantBScores, matchFormat),
+    });
+  }
 
-    const expectedWinner =
-      parsedScore.winner === 'A' ? match.participantAEntryId : match.participantBEntryId;
-    if (expectedWinner !== matchForm.winnerEntryId) {
-      setStatusMessage('比分结果与所选胜者不一致，请检查。');
-      return;
-    }
+  async function maybeCompleteTournament(tournamentId: string, updatedMatchId: string) {
+    const tournamentMatches = matches.filter((match) => match.tournamentId === tournamentId);
+    const allCompleted = tournamentMatches.every(
+      (match) => match.id === updatedMatchId || match.status === 'COMPLETED',
+    );
 
-    setSaving(true);
-    setStatusMessage('');
-
-    try {
-      await client.models.Match.update(
+    if (allCompleted) {
+      await client.models.Tournament.update(
         {
-          id: match.id,
-          winnerEntryId: matchForm.winnerEntryId,
-          score: matchForm.score.trim(),
+          id: tournamentId,
           status: 'COMPLETED',
           completedAt: new Date().toISOString(),
         } as any,
         authModeForAdmin(true),
       );
-
-      if (match.stage === 'KNOCKOUT') {
-        const winnerEntry = entries.find((item) => item.id === matchForm.winnerEntryId);
-        await cascadeKnockoutUpdate(match.id, {
-          winnerEntryId: matchForm.winnerEntryId,
-          winnerName: winnerEntry?.entryName ?? '',
-        });
-      }
-
-      const tournament = tournaments.find((item) => item.id === match.tournamentId);
-      if (tournament && tournament.mode === 'KNOCKOUT') {
-        const tournamentMatches = matches.filter((item) => item.tournamentId === tournament.id);
-        const finalMatch = tournamentMatches
-          .filter((item) => item.stage === 'KNOCKOUT')
-          .sort((left, right) => right.roundNumber - left.roundNumber)[0];
-
-        if (finalMatch?.id === match.id) {
-          await client.models.Tournament.update(
-            {
-              id: tournament.id,
-              status: 'COMPLETED',
-              completedAt: new Date().toISOString(),
-            } as any,
-            authModeForAdmin(true),
-          );
-        }
-      }
-
-      setMatchForm({ matchId: '', winnerEntryId: '', score: '' });
-      setStatusMessage('比赛比分已保存。');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '保存比分失败。';
-      setStatusMessage(message);
-    } finally {
-      setSaving(false);
     }
   }
 
   async function cascadeKnockoutUpdate(
     sourceMatchId: string,
-    winner: { winnerEntryId?: string; winnerName?: string } = {},
+    winner: { winnerEntryIds?: string[]; winnerName?: string } = {},
   ) {
-    const currentMatch = matches.find((item) => item.id === sourceMatchId);
+    const currentMatch = matches.find((match) => match.id === sourceMatchId);
     if (!currentMatch) {
       return;
     }
 
     const nextMatch = matches.find(
-      (item) =>
-        item.tournamentId === currentMatch.tournamentId &&
-        item.stage === 'KNOCKOUT' &&
-        item.roundNumber === currentMatch.roundNumber + 1 &&
-        item.matchNumber === Math.ceil(currentMatch.matchNumber / 2),
+      (match) =>
+        match.tournamentId === currentMatch.tournamentId &&
+        match.stage === 'KNOCKOUT' &&
+        match.roundNumber === currentMatch.roundNumber + 1 &&
+        match.matchNumber === Math.ceil(currentMatch.matchNumber / 2),
     );
 
     if (!nextMatch) {
@@ -573,47 +746,103 @@ function App() {
     }
 
     const isLeftBracket = currentMatch.matchNumber % 2 === 1;
-    const participantAEntryId = isLeftBracket
-      ? winner.winnerEntryId ?? null
-      : nextMatch.participantAEntryId ?? null;
-    const participantAName = isLeftBracket
-      ? winner.winnerName ?? null
-      : nextMatch.participantAName ?? null;
-    const participantBEntryId = isLeftBracket
-      ? nextMatch.participantBEntryId ?? null
-      : winner.winnerEntryId ?? null;
-    const participantBName = isLeftBracket
-      ? nextMatch.participantBName ?? null
-      : winner.winnerName ?? null;
-
-    const participants = [participantAEntryId, participantBEntryId].filter(Boolean);
-    const winnerStillValid =
-      nextMatch.winnerEntryId && participants.includes(nextMatch.winnerEntryId);
+    const participantAEntryIds = isLeftBracket
+      ? winner.winnerEntryIds ?? []
+      : nextMatch.participantAEntryIds ?? (nextMatch.participantAEntryId ? [nextMatch.participantAEntryId] : []);
+    const participantBEntryIds = isLeftBracket
+      ? nextMatch.participantBEntryIds ?? (nextMatch.participantBEntryId ? [nextMatch.participantBEntryId] : [])
+      : winner.winnerEntryIds ?? [];
 
     const updatePayload: any = {
       id: nextMatch.id,
-      participantAEntryId,
-      participantAName,
-      participantBEntryId,
-      participantBName,
+      participantAEntryIds: participantAEntryIds.length ? participantAEntryIds : null,
+      participantAEntryId: participantAEntryIds.length === 1 ? participantAEntryIds[0] : null,
+      participantAName: isLeftBracket ? winner.winnerName ?? null : nextMatch.participantAName,
+      participantBEntryIds: participantBEntryIds.length ? participantBEntryIds : null,
+      participantBEntryId: participantBEntryIds.length === 1 ? participantBEntryIds[0] : null,
+      participantBName: isLeftBracket ? nextMatch.participantBName : winner.winnerName ?? null,
       status:
-        participantAEntryId && participantBEntryId
-          ? winnerStillValid && nextMatch.status === 'COMPLETED'
-            ? 'COMPLETED'
-            : 'IN_PROGRESS'
-          : 'PENDING',
+        participantAEntryIds.length && participantBEntryIds.length ? 'IN_PROGRESS' : 'PENDING',
+      winnerEntryId: null,
+      winnerSide: null,
+      participantAScores: null,
+      participantBScores: null,
+      score: null,
+      completedAt: null,
     };
 
-    if (!winnerStillValid) {
-      updatePayload.winnerEntryId = null;
-      updatePayload.score = null;
-      updatePayload.completedAt = null;
+    await client.models.Match.update(updatePayload as any, authModeForAdmin(true));
+    await cascadeKnockoutUpdate(nextMatch.id, {});
+  }
+
+  async function recordMatch(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!isAdmin || !selectedMatch) {
+      return;
     }
 
-    await client.models.Match.update(updatePayload as any, authModeForAdmin(true));
+    const evaluated = evaluateMatchScore(
+      matchForm.participantAScores,
+      matchForm.participantBScores,
+      selectedMatchFormat,
+    );
 
-    if (!winnerStillValid) {
-      await cascadeKnockoutUpdate(nextMatch.id, {});
+    if (!evaluated) {
+      setStatusMessage('Please enter a valid score line based on the selected match format.');
+      return;
+    }
+
+    const winnerEntryId =
+      evaluated.winner === 'A'
+        ? selectedMatch.participantAEntryId ?? null
+        : selectedMatch.participantBEntryId ?? null;
+    const winnerEntryIds =
+      evaluated.winner === 'A'
+        ? selectedMatch.participantAEntryIds ?? (selectedMatch.participantAEntryId ? [selectedMatch.participantAEntryId] : [])
+        : selectedMatch.participantBEntryIds ?? (selectedMatch.participantBEntryId ? [selectedMatch.participantBEntryId] : []);
+    const winnerName =
+      evaluated.winner === 'A'
+        ? selectedMatch.participantAName
+        : selectedMatch.participantBName;
+
+    setSaving(true);
+    setStatusMessage('');
+
+    try {
+      await client.models.Match.update(
+        {
+          id: selectedMatch.id,
+          participantAScores: evaluated.participantAScores,
+          participantBScores: evaluated.participantBScores,
+          winnerEntryId,
+          winnerSide: evaluated.winner,
+          score: evaluated.summary,
+          status: 'COMPLETED',
+          completedAt: new Date().toISOString(),
+        } as any,
+        authModeForAdmin(true),
+      );
+
+      if (selectedMatch.stage === 'KNOCKOUT') {
+        await cascadeKnockoutUpdate(selectedMatch.id, {
+          winnerEntryIds,
+          winnerName,
+        });
+      }
+
+      await maybeCompleteTournament(selectedMatch.tournamentId, selectedMatch.id);
+
+      setMatchForm({
+        matchId: '',
+        participantAScores: createEmptyScoreInputs('BEST_OF_3'),
+        participantBScores: createEmptyScoreInputs('BEST_OF_3'),
+      });
+      setStatusMessage('Match score saved successfully.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save the match score.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -631,49 +860,85 @@ function App() {
       for (const match of tournamentMatches) {
         await client.models.Match.delete({ id: match.id } as any, authModeForAdmin(true));
       }
+
       for (const entry of tournamentEntries) {
         await client.models.TournamentEntry.delete(
           { id: entry.id } as any,
           authModeForAdmin(true),
         );
       }
+
       await client.models.Tournament.delete(
         { id: tournamentId } as any,
         authModeForAdmin(true),
       );
-      setStatusMessage('赛事已删除。');
+      setStatusMessage('Tournament deleted.');
     } finally {
       setSaving(false);
     }
   }
 
-  const availableParticipantOptions =
-    tournamentForm.eventType === 'SINGLES'
-      ? players.filter((player) => player.isActive)
-      : teams;
+  function renderParticipantRow(
+    match: Match,
+    side: WinnerSide,
+    finalMatch: Match | undefined,
+  ) {
+    const isWinner = isSideWinner(match, side);
+    const isFinal = finalMatch?.id === match.id && match.status === 'COMPLETED';
+    const isChampion = isFinal && isWinner;
+    const isRunnerUp = isFinal && !isWinner;
+    const participantName = side === 'A' ? match.participantAName : match.participantBName;
+    const scores = getScoreList(match, side);
+
+    return (
+      <div
+        className={`slot-row ${isWinner ? 'winner-row' : ''} ${isChampion ? 'champion-row' : ''}`}
+      >
+        <div className="participant-meta">
+          <span className="participant-name">{participantName || 'TBD'}</span>
+          <div className="participant-badges">
+            {isWinner ? <span className="inline-badge winner-badge">✓ Winner</span> : null}
+            {isChampion ? <span className="inline-badge champion-badge">🏆 Champion</span> : null}
+            {isRunnerUp ? <span className="inline-badge runnerup-badge">🥈 Runner-up</span> : null}
+          </div>
+        </div>
+        <div className="set-score-strip">
+          {scores.length ? (
+            scores.map((score: number, index: number) => (
+              <span className="set-score-cell" key={`${match.id}-${side}-${index}`}>
+                {score}
+              </span>
+            ))
+          ) : (
+            <span className="set-score-placeholder">{match.score === 'BYE' ? 'BYE' : '—'}</span>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
       <header className="hero-banner">
         <div>
           <p className="eyebrow">Tennis Tournament Control Center</p>
-          <h1>网球比赛管理系统</h1>
+          <h1>Tennis Score Board</h1>
           <p className="hero-copy">
-            访客无需登录即可实时查看进行中的赛事、淘汰赛签表、小组赛积分表与历史战绩；
-            管理员登录后可维护球员、双打组合、赛事与比分录入。
+            Visitors can follow live tournaments in real time, while admins can manage players,
+            teams, draws, team battles, and multi-set score entry from a single control panel.
           </p>
         </div>
         <div className="hero-stats">
           <div className="stat-card">
-            <span>活跃赛事</span>
+            <span>Active tournaments</span>
             <strong>{activeTournaments.length}</strong>
           </div>
           <div className="stat-card">
-            <span>球员总数</span>
+            <span>Players</span>
             <strong>{players.length}</strong>
           </div>
           <div className="stat-card">
-            <span>比赛场次</span>
+            <span>Matches</span>
             <strong>{matches.length}</strong>
           </div>
         </div>
@@ -683,152 +948,185 @@ function App() {
         <div className="section-heading">
           <div>
             <p className="section-tag">Visitor View</p>
-            <h2>实时赛事大屏</h2>
+            <h2>Live Tournament Display</h2>
           </div>
           <p className="section-desc">
-            数据通过 Amplify Data 实时订阅刷新，管理员录入比分后，页面会自动更新。
+            All public screens are read-only and refresh automatically through Amplify real-time
+            subscriptions.
           </p>
         </div>
 
         {tournamentCards.length === 0 ? (
           <div className="empty-state">
-            暂无进行中的赛事。管理员创建赛事后，这里会自动展示实时赛况。
+            No live tournament is available yet. Once an admin creates one, the public board will
+            update automatically.
           </div>
         ) : (
           <div className="tournament-grid">
-            {tournamentCards.map(({ tournament, entries: tournamentEntries, matches: tournamentMatches, standings }) => (
-              <article className="tournament-card" key={tournament.id}>
-                <div className="card-head">
-                  <div>
-                    <p className="meta-line">
-                      {tournament.mode === 'KNOCKOUT' ? '淘汰赛' : '小组循环赛'} ·{' '}
-                      {tournament.eventType === 'SINGLES' ? '单打' : '双打'}
-                    </p>
-                    <h3>{tournament.name}</h3>
+            {tournamentCards.map(({ tournament, entries: tournamentEntries, matches: tournamentMatches, standings, teamSummary }) => {
+              const finalMatch = getFinalMatch(tournamentMatches);
+              return (
+                <article className="tournament-card" key={tournament.id}>
+                  <div className="card-head">
+                    <div>
+                      <p className="meta-line">
+                        {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
+                        {getMatchFormatLabel(tournament.matchFormat)}
+                      </p>
+                      <h3>{tournament.name}</h3>
+                    </div>
+                    <span className={`status-pill status-${String(tournament.status).toLowerCase()}`}>
+                      {tournament.status === 'COMPLETED' ? 'Completed' : 'Live'}
+                    </span>
                   </div>
-                  <span className={`status-pill status-${tournament.status?.toLowerCase()}`}>
-                    {tournament.status === 'COMPLETED'
-                      ? '已结束'
-                      : tournament.status === 'LIVE'
-                        ? '进行中'
-                        : '草稿'}
-                  </span>
-                </div>
 
-                {tournament.mode === 'KNOCKOUT' ? (
-                  <div className="bracket-rounds">
-                    {groupKnockoutRounds(tournamentMatches).map(([round, roundMatches]) => (
+                  {tournament.mode === 'KNOCKOUT' ? (
+                    <div className="bracket-rounds">
+                      {groupKnockoutRounds(tournamentMatches).map(([round, roundMatches]) => (
                         <div className="round-column" key={`${tournament.id}-${round}`}>
-                          <h4>{roundMatches[0]?.roundLabel ?? `第 ${round} 轮`}</h4>
+                          <h4>{roundMatches[0]?.roundLabel ?? `Round ${round}`}</h4>
                           {roundMatches.map((match) => (
                             <div className="match-box" key={match.id}>
-                              <div className="slot-row">
-                                <span>{match.participantAName || '待定'}</span>
+                              {renderParticipantRow(match, 'A', finalMatch)}
+                              {renderParticipantRow(match, 'B', finalMatch)}
+                              <div className="match-foot">
+                                <span>{match.score === 'BYE' ? 'Automatic advance by BYE' : match.score || 'Score pending'}</span>
                               </div>
-                              <div className="slot-row">
-                                <span>{match.participantBName || '待定'}</span>
-                              </div>
-                              <div className="match-foot">{displayMatchScore(match)}</div>
                             </div>
                           ))}
                         </div>
                       ))}
-                  </div>
-                ) : (
-                  <div className="group-layout">
-                    {standings.map((group) => (
-                      <section className="group-card" key={`${tournament.id}-${group.groupName}`}>
-                        <div className="group-head">
-                          <h4>{group.groupName} 组</h4>
-                          <span>前 {tournament.qualifyPerGroup ?? 2} 名出线</span>
-                        </div>
-                        <div className="table-wrap">
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>选手</th>
-                                <th>积分</th>
-                                <th>胜场</th>
-                                <th>总胜局</th>
-                                <th>净胜局</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {group.standings.map((row, index) => (
-                                <tr
-                                  key={row.entryId}
-                                  className={
-                                    index < (tournament.qualifyPerGroup ?? 2) ? 'qualified' : ''
-                                  }
-                                >
-                                  <td>{row.entryName}</td>
-                                  <td>{row.points}</td>
-                                  <td>{row.wins}</td>
-                                  <td>{row.gamesWon}</td>
-                                  <td>{row.gamesWon - row.gamesLost}</td>
+                    </div>
+                  ) : null}
+
+                  {tournament.mode === 'ROUND_ROBIN' ? (
+                    <div className="group-layout">
+                      {standings.map((group) => (
+                        <section className="group-card" key={`${tournament.id}-${group.groupName}`}>
+                          <div className="group-head">
+                            <h4>Group {group.groupName}</h4>
+                            <span>Top {tournament.qualifyPerGroup ?? 2} advance</span>
+                          </div>
+                          <div className="table-wrap">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>Entry</th>
+                                  <th>Points</th>
+                                  <th>Wins</th>
+                                  <th>Games Won</th>
+                                  <th>Net Games</th>
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div className="table-wrap">
-                          <table className="matrix-table">
-                            <thead>
-                              <tr>
-                                <th>{group.groupName} 组对阵</th>
+                              </thead>
+                              <tbody>
+                                {group.standings.map((row, index) => (
+                                  <tr
+                                    key={row.entryId}
+                                    className={index < (tournament.qualifyPerGroup ?? 2) ? 'qualified' : ''}
+                                  >
+                                    <td>{row.entryName}</td>
+                                    <td>{row.points}</td>
+                                    <td>{row.wins}</td>
+                                    <td>{row.gamesWon}</td>
+                                    <td>{row.gamesWon - row.gamesLost}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <div className="table-wrap">
+                            <table className="matrix-table">
+                              <thead>
+                                <tr>
+                                  <th>Round Robin Matrix</th>
+                                  {formatRoundRobinMatrix(
+                                    tournamentEntries as any[],
+                                    tournamentMatches as any[],
+                                    group.groupName,
+                                  ).map((item) => (
+                                    <th key={`${group.groupName}-${item.entry.id}`}>{item.entry.entryName}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
                                 {formatRoundRobinMatrix(
                                   tournamentEntries as any[],
                                   tournamentMatches as any[],
                                   group.groupName,
-                                ).map((item) => (
-                                  <th key={`${group.groupName}-${item.entry.id}`}>
-                                    {item.entry.entryName}
-                                  </th>
+                                ).map((row) => (
+                                  <tr key={row.entry.id}>
+                                    <td>{row.entry.entryName}</td>
+                                    {row.cells.map((cell, index) => (
+                                      <td key={`${row.entry.id}-${index}`}>{cell}</td>
+                                    ))}
+                                  </tr>
                                 ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {formatRoundRobinMatrix(
-                                tournamentEntries as any[],
-                                tournamentMatches as any[],
-                                group.groupName,
-                              ).map((row) => (
-                                <tr key={row.entry.id}>
-                                  <td>{row.entry.entryName}</td>
-                                  {row.cells.map((cell, index) => (
-                                    <td key={`${row.entry.id}-${index}`}>{cell}</td>
-                                  ))}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </section>
-                    ))}
-                  </div>
-                )}
-
-                <div className="history-list">
-                  <h4>历史战绩</h4>
-                  {tournamentMatches.filter((match) => match.status === 'COMPLETED').length === 0 ? (
-                    <p className="history-empty">暂无已完赛记录。</p>
-                  ) : (
-                    tournamentMatches
-                      .filter((match) => match.status === 'COMPLETED')
-                      .map((match) => (
-                        <div className="history-item" key={`${tournament.id}-${match.id}`}>
-                          <div>
-                            <strong>{match.participantAName || '待定'}</strong>
-                            <span> vs </span>
-                            <strong>{match.participantBName || '待定'}</strong>
+                              </tbody>
+                            </table>
                           </div>
-                          <span>{displayMatchScore(match)}</span>
-                        </div>
-                      ))
-                  )}
-                </div>
-              </article>
-            ))}
+                        </section>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {tournament.mode === 'TEAM_BATTLE' && teamSummary ? (
+                    <div className="team-battle-layout">
+                      <div className="team-battle-summary">
+                        {teamSummary.teams.map((team) => (
+                          <div
+                            className={`team-summary-card ${teamSummary.winner?.teamLabel === team.teamLabel ? 'team-summary-winner' : ''}`}
+                            key={`${tournament.id}-${team.teamLabel}`}
+                          >
+                            <h4>{team.teamLabel}</h4>
+                            <div className="team-summary-stats">
+                              <span>Match wins: <strong>{team.matchWins}</strong></span>
+                              <span>Games won: <strong>{team.gamesWon}</strong></span>
+                              <span>Net games: <strong>{team.gamesWon - team.gamesLost}</strong></span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="team-submatch-list">
+                        {tournamentMatches.map((match) => (
+                          <div className="team-submatch-card" key={match.id}>
+                            <div className="team-submatch-head">
+                              <strong>{match.roundLabel}</strong>
+                              <span>{match.matchCategory === 'TEAM_DOUBLES' ? 'Doubles' : 'Singles'}</span>
+                            </div>
+                            {renderParticipantRow(match, 'A', undefined)}
+                            {renderParticipantRow(match, 'B', undefined)}
+                            <div className="match-foot">
+                              <span>{match.score || 'Score pending'}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="history-list">
+                    <h4>Completed Matches</h4>
+                    {tournamentMatches.filter((match) => match.status === 'COMPLETED').length === 0 ? (
+                      <p className="history-empty">No completed matches yet.</p>
+                    ) : (
+                      tournamentMatches
+                        .filter((match) => match.status === 'COMPLETED')
+                        .map((match) => (
+                          <div className="history-item" key={`${tournament.id}-${match.id}`}>
+                            <div>
+                              <strong>{match.participantAName || 'TBD'}</strong>
+                              <span> vs </span>
+                              <strong>{match.participantBName || 'TBD'}</strong>
+                            </div>
+                            <span>{match.score || 'Completed'}</span>
+                          </div>
+                        ))
+                    )}
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
       </section>
@@ -837,15 +1135,16 @@ function App() {
         <div className="section-heading">
           <div>
             <p className="section-tag">Admin Console</p>
-            <h2>管理员后台</h2>
+            <h2>Admin Management</h2>
           </div>
           <p className="section-desc">
-            只有加入 Cognito `admin` 用户组的账号才能新增球员、创建赛事并录入比分。
+            The admin console supports seeded manual selection, random draw, multi-set score entry,
+            knockout propagation, and team battle scheduling.
           </p>
         </div>
 
         {!authChecked ? (
-          <div className="empty-state">正在检查管理员会话...</div>
+          <div className="empty-state">Checking admin session...</div>
         ) : !isAdmin ? (
           <div className="admin-auth-layout">
             <div className="auth-switch">
@@ -854,27 +1153,28 @@ function App() {
                 onClick={() => setAuthView('visitor')}
                 type="button"
               >
-                访客说明
+                Read-only mode
               </button>
               <button
                 className={authView === 'admin' ? 'active' : ''}
                 onClick={() => setAuthView('admin')}
                 type="button"
               >
-                管理员登录
+                Admin sign in
               </button>
             </div>
 
             {authView === 'visitor' ? (
               <div className="empty-state">
-                当前处于访客模式。切换到“管理员登录”后，可使用 Cognito 账号进入后台。
+                The public board stays accessible without sign-in. Use an account inside the
+                Cognito <code>admin</code> group to unlock management features.
               </div>
             ) : (
               <div className="admin-login-grid">
                 <form className="panel-form" onSubmit={handleAdminSignIn}>
-                  <h3>管理员登录</h3>
+                  <h3>Admin Sign In</h3>
                   <label>
-                    邮箱
+                    Email
                     <input
                       type="email"
                       value={adminLogin.email}
@@ -884,12 +1184,11 @@ function App() {
                           email: event.target.value,
                         }))
                       }
-                      placeholder="admin@example.com"
                       required
                     />
                   </label>
                   <label>
-                    密码
+                    Password
                     <input
                       type="password"
                       value={adminLogin.password}
@@ -903,17 +1202,17 @@ function App() {
                     />
                   </label>
                   <button className="primary-button" type="submit">
-                    登录后台
+                    Sign in
                   </button>
                   {authError ? <p className="error-text">{authError}</p> : null}
                 </form>
 
                 <div className="panel-info">
-                  <h3>管理员初始化建议</h3>
+                  <h3>Admin setup notes</h3>
                   <ul>
-                    <li>先在 Amplify Auth 中创建管理员账号。</li>
-                    <li>将该账号加入 Cognito `admin` 用户组。</li>
-                    <li>登录后即可使用下方管理能力。</li>
+                    <li>Create the admin account in Amplify Auth / Cognito.</li>
+                    <li>Add that account into the <code>admin</code> user group.</li>
+                    <li>After sign-in, write access becomes available automatically.</li>
                   </ul>
                   <div className="authenticator-preview">
                     <Authenticator />
@@ -925,9 +1224,9 @@ function App() {
         ) : (
           <div className="admin-console">
             <div className="admin-topbar">
-              <p>当前已使用管理员身份登录。</p>
+              <p>Signed in as admin.</p>
               <button className="secondary-button" onClick={handleSignOut} type="button">
-                退出登录
+                Sign out
               </button>
             </div>
 
@@ -935,21 +1234,20 @@ function App() {
 
             <div className="admin-grid">
               <form className="panel-form" onSubmit={createPlayer}>
-                <h3>新增球员</h3>
+                <h3>Add Player</h3>
                 <label>
-                  姓名
+                  Name
                   <input
                     type="text"
                     value={playerForm.name}
                     onChange={(event) =>
                       setPlayerForm((current) => ({ ...current, name: event.target.value }))
                     }
-                    placeholder="例如：张三"
                     required
                   />
                 </label>
                 <label>
-                  性别
+                  Gender
                   <select
                     value={playerForm.gender}
                     onChange={(event) =>
@@ -959,43 +1257,40 @@ function App() {
                       }))
                     }
                   >
-                    <option value="UNSPECIFIED">未指定</option>
-                    <option value="MALE">男</option>
-                    <option value="FEMALE">女</option>
-                    <option value="MIXED">混合</option>
+                    <option value="UNSPECIFIED">Unspecified</option>
+                    <option value="MALE">Male</option>
+                    <option value="FEMALE">Female</option>
+                    <option value="MIXED">Mixed</option>
                   </select>
                 </label>
                 <button className="primary-button" type="submit" disabled={saving}>
-                  保存球员
+                  Save player
                 </button>
               </form>
 
               <form className="panel-form" onSubmit={createTeam}>
-                <h3>创建双打组合</h3>
+                <h3>Create Doubles Team</h3>
                 <label>
-                  队伍名称
+                  Team name
                   <input
                     type="text"
                     value={teamForm.name}
                     onChange={(event) =>
                       setTeamForm((current) => ({ ...current, name: event.target.value }))
                     }
-                    placeholder="留空则自动按姓名生成"
+                    placeholder="Leave empty to auto-generate"
                   />
                 </label>
                 <label>
-                  选手 A
+                  Player A
                   <select
                     value={teamForm.playerOneId}
                     onChange={(event) =>
-                      setTeamForm((current) => ({
-                        ...current,
-                        playerOneId: event.target.value,
-                      }))
+                      setTeamForm((current) => ({ ...current, playerOneId: event.target.value }))
                     }
                     required
                   >
-                    <option value="">请选择球员</option>
+                    <option value="">Select a player</option>
                     {players.map((player) => (
                       <option key={player.id} value={player.id}>
                         {player.name}
@@ -1004,18 +1299,15 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  选手 B
+                  Player B
                   <select
                     value={teamForm.playerTwoId}
                     onChange={(event) =>
-                      setTeamForm((current) => ({
-                        ...current,
-                        playerTwoId: event.target.value,
-                      }))
+                      setTeamForm((current) => ({ ...current, playerTwoId: event.target.value }))
                     }
                     required
                   >
-                    <option value="">请选择球员</option>
+                    <option value="">Select a player</option>
                     {players.map((player) => (
                       <option key={player.id} value={player.id}>
                         {player.name}
@@ -1024,63 +1316,136 @@ function App() {
                   </select>
                 </label>
                 <button className="primary-button" type="submit" disabled={saving}>
-                  保存组合
+                  Save doubles team
                 </button>
               </form>
 
               <form className="panel-form full-span" onSubmit={createTournament}>
-                <h3>创建赛事</h3>
+                <h3>Create Tournament</h3>
+
                 <div className="form-grid">
                   <label>
-                    赛事名称
+                    Tournament name
                     <input
                       type="text"
                       value={tournamentForm.name}
                       onChange={(event) =>
-                        setTournamentForm((current) => ({
-                          ...current,
-                          name: event.target.value,
-                        }))
+                        setTournamentForm((current) => ({ ...current, name: event.target.value }))
                       }
-                      placeholder="例如：2026 夏季俱乐部杯 - 男单"
+                      placeholder="2026 Summer Club Cup - Men's Singles"
                       required
                     />
                   </label>
                   <label>
-                    赛事模式
+                    Event type
                     <select
-                      value={tournamentForm.mode}
-                      onChange={(event) =>
-                        setTournamentForm((current) => ({
-                          ...current,
-                          mode: event.target.value as TournamentMode,
-                        }))
-                      }
+                      value={tournamentForm.eventType}
+                      onChange={(event) => updateTournamentMode(event.target.value as EventType)}
                     >
-                      <option value="KNOCKOUT">淘汰赛</option>
-                      <option value="ROUND_ROBIN">小组循环赛</option>
+                      <option value="SINGLES">Singles</option>
+                      <option value="DOUBLES">Doubles</option>
+                      <option value="TEAM">Team Battle</option>
                     </select>
                   </label>
                   <label>
-                    比赛类型
+                    Match format
                     <select
-                      value={tournamentForm.eventType}
+                      value={tournamentForm.matchFormat}
                       onChange={(event) =>
                         setTournamentForm((current) => ({
                           ...current,
-                          eventType: event.target.value as EventType,
-                          selectedParticipantIds: [],
+                          matchFormat: event.target.value as MatchFormat,
                         }))
                       }
                     >
-                      <option value="SINGLES">单打</option>
-                      <option value="DOUBLES">双打</option>
+                      <option value="SINGLE_SET">Single Set</option>
+                      <option value="BEST_OF_3">Best of 3</option>
+                      <option value="BEST_OF_5">Best of 5</option>
                     </select>
                   </label>
-                  {tournamentForm.mode === 'ROUND_ROBIN' ? (
+
+                  {tournamentForm.eventType !== 'TEAM' ? (
+                    <label>
+                      Tournament mode
+                      <select
+                        value={tournamentForm.mode}
+                        onChange={(event) =>
+                          setTournamentForm((current) => ({
+                            ...current,
+                            mode: event.target.value as TournamentMode,
+                          }))
+                        }
+                      >
+                        <option value="KNOCKOUT">Knockout</option>
+                        <option value="ROUND_ROBIN">Round Robin</option>
+                      </select>
+                    </label>
+                  ) : (
                     <>
                       <label>
-                        小组数量
+                        Team count
+                        <input
+                          type="number"
+                          min={2}
+                          max={2}
+                          value={tournamentForm.teamCount}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              teamCount: Number(event.target.value),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Players per team
+                        <input
+                          type="number"
+                          min={2}
+                          step={2}
+                          value={tournamentForm.teamSize}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              teamSize: Number(event.target.value),
+                              selectedParticipantIds: [],
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Team A label
+                        <input
+                          type="text"
+                          value={tournamentForm.teamALabel}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              teamALabel: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Team B label
+                        <input
+                          type="text"
+                          value={tournamentForm.teamBLabel}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              teamBLabel: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                    </>
+                  )}
+
+                  {tournamentForm.eventType !== 'TEAM' && tournamentForm.mode === 'ROUND_ROBIN' ? (
+                    <>
+                      <label>
+                        Group count
                         <input
                           type="number"
                           min={1}
@@ -1095,7 +1460,7 @@ function App() {
                         />
                       </label>
                       <label>
-                        每组出线人数
+                        Qualifiers per group
                         <input
                           type="number"
                           min={1}
@@ -1110,9 +1475,11 @@ function App() {
                         />
                       </label>
                     </>
-                  ) : (
+                  ) : null}
+
+                  {tournamentForm.eventType !== 'TEAM' && tournamentForm.mode === 'KNOCKOUT' ? (
                     <label className="wide-field">
-                      自定义轮次名称
+                      Custom round labels
                       <input
                         type="text"
                         value={tournamentForm.customRoundLabels}
@@ -1122,135 +1489,191 @@ function App() {
                             customRoundLabels: event.target.value,
                           }))
                         }
-                        placeholder="例如：资格赛, 8强, 半决赛, 决赛"
+                        placeholder="Qualifier, Quarterfinal, Semifinal, Final"
                       />
                     </label>
-                  )}
+                  ) : null}
                 </div>
 
                 <fieldset className="participant-picker">
                   <legend>
-                    选择参赛{tournamentForm.eventType === 'SINGLES' ? '球员' : '双打组合'}
+                    Select{' '}
+                    {tournamentForm.eventType === 'DOUBLES'
+                      ? 'doubles teams'
+                      : tournamentForm.eventType === 'TEAM'
+                        ? 'players for team battle'
+                        : 'players'}
                   </legend>
-                  <div className="participant-options">
-                    {availableParticipantOptions.map((participant) => (
-                      <label key={participant.id} className="checkbox-chip">
-                        <input
-                          type="checkbox"
-                          checked={tournamentForm.selectedParticipantIds.includes(participant.id)}
-                          onChange={(event) =>
-                            setTournamentForm((current) => ({
-                              ...current,
-                              selectedParticipantIds: event.target.checked
-                                ? [...current.selectedParticipantIds, participant.id]
-                                : current.selectedParticipantIds.filter((id) => id !== participant.id),
-                            }))
-                          }
-                        />
-                        <span>{participant.name}</span>
-                      </label>
-                    ))}
+
+                  <div className="participant-picker-toolbar">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={handleRandomDraw}
+                      disabled={tournamentForm.selectedParticipantIds.length < 2}
+                    >
+                      🎲 Random Draw / Shuffle
+                    </button>
+                    <span className="picker-hint">
+                      Selection order becomes the live seed order shown as #1, #2, #3...
+                    </span>
                   </div>
+
+                  <div className="participant-options">
+                    {availableParticipantOptions.map((participant) => {
+                      const seedOrder = selectedOrderMap.get(participant.id);
+                      return (
+                        <label
+                          key={participant.id}
+                          className={`checkbox-chip ${seedOrder ? 'checkbox-chip-active' : ''}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(seedOrder)}
+                            onChange={(event) =>
+                              toggleParticipantSelection(participant.id, event.target.checked)
+                            }
+                          />
+                          <span>{participant.name}</span>
+                          {seedOrder ? <span className="seed-order-badge">#{seedOrder}</span> : null}
+                        </label>
+                      );
+                    })}
+                  </div>
+
+                  {selectedParticipants.length ? (
+                    <div className="selected-order-panel">
+                      <strong>Current selection order</strong>
+                      <div className="selected-order-chips">
+                        {selectedParticipants.map((participant) => (
+                          <span className="selected-order-chip" key={participant.id}>
+                            #{participant.order} {participant.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {teamBattlePreview.length ? (
+                    <div className="team-preview-grid">
+                      {teamBattlePreview.map((team) => (
+                        <div className="team-preview-card" key={team.label}>
+                          <h4>{team.label}</h4>
+                          {team.members.length ? (
+                            team.members.map((member, index) => (
+                              <div className="team-preview-row" key={`${team.label}-${member.id}`}>
+                                <span>#{index + 1}</span>
+                                <strong>{member.name}</strong>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="team-preview-empty">No players assigned yet.</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </fieldset>
 
                 <button className="primary-button" type="submit" disabled={saving}>
-                  生成赛事与赛程
+                  Create draw and schedule
                 </button>
               </form>
 
               <form className="panel-form" onSubmit={recordMatch}>
-                <h3>录入比分</h3>
+                <h3>Record Match Score</h3>
                 <label>
-                  选择比赛
+                  Select match
                   <select
                     value={matchForm.matchId}
-                    onChange={(event) => {
-                      const selectedMatchId = event.target.value;
-                      const selectedMatch = editableMatches.find(
-                        (match) => match.id === selectedMatchId,
-                      );
-                      setMatchForm({
-                        matchId: selectedMatchId,
-                        winnerEntryId: '',
-                        score: selectedMatch?.score ?? '',
-                      });
-                    }}
+                    onChange={(event) => handleMatchSelection(event.target.value)}
                     required
                   >
-                    <option value="">请选择比赛</option>
-                    {editableMatches
-                      .filter((match) => match.participantAEntryId && match.participantBEntryId)
-                      .map((match) => (
-                        <option key={match.id} value={match.id}>
-                          {match.roundLabel} - {match.participantAName || '待定'} vs{' '}
-                          {match.participantBName || '待定'}
-                        </option>
+                    <option value="">Choose a match</option>
+                    {editableMatches.map((match) => (
+                      <option key={match.id} value={match.id}>
+                        {match.roundLabel} - {match.participantAName || 'TBD'} vs{' '}
+                        {match.participantBName || 'TBD'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {selectedMatch ? (
+                  <div className="match-entry-panel">
+                    <div className="match-entry-head">
+                      <strong>{selectedMatch.roundLabel}</strong>
+                      <span>{getMatchFormatLabel(selectedMatchFormat)}</span>
+                    </div>
+
+                    <div className="set-entry-header">
+                      <span>Entry</span>
+                      {Array.from({ length: getBestOf(selectedMatchFormat) }, (_, index) => (
+                        <span key={`set-header-${index}`}>Set {index + 1}</span>
                       ))}
-                  </select>
-                </label>
-                <label>
-                  胜者
-                  <select
-                    value={matchForm.winnerEntryId}
-                    onChange={(event) =>
-                      setMatchForm((current) => ({
-                        ...current,
-                        winnerEntryId: event.target.value,
-                      }))
-                    }
-                    required
-                  >
-                    <option value="">请选择胜者</option>
-                    {(() => {
-                      const selectedMatch = editableMatches.find(
-                        (match) => match.id === matchForm.matchId,
-                      );
-                      if (!selectedMatch) {
-                        return null;
-                      }
-                      return [selectedMatch.participantAEntryId, selectedMatch.participantBEntryId]
-                        .filter(isAmplifyListItem)
-                        .map((entryId) => {
-                          const entry = entries.find((item) => item.id === entryId);
-                          return entry ? (
-                            <option key={entry.id} value={entry.id}>
-                              {optionLabelForEntry(entry, playerMap, teamMap)}
-                            </option>
-                          ) : null;
-                        });
-                    })()}
-                  </select>
-                </label>
-                <label>
-                  比分
-                  <input
-                    type="text"
-                    value={matchForm.score}
-                    onChange={(event) =>
-                      setMatchForm((current) => ({ ...current, score: event.target.value }))
-                    }
-                    placeholder="例如：6-4, 3-6, 10-8"
-                    required
-                  />
-                </label>
-                <button className="primary-button" type="submit" disabled={saving}>
-                  保存比分
+                    </div>
+
+                    {([
+                      { side: 'A' as const, label: selectedMatch.participantAName || 'TBD' },
+                      { side: 'B' as const, label: selectedMatch.participantBName || 'TBD' },
+                    ]).map((participant) => (
+                      <div className="set-entry-row" key={`${selectedMatch.id}-${participant.side}`}>
+                        <strong>{participant.label}</strong>
+                        {(participant.side === 'A'
+                          ? matchForm.participantAScores
+                          : matchForm.participantBScores
+                        )
+                          .slice(0, getBestOf(selectedMatchFormat))
+                          .map((value, index) => (
+                            <input
+                              key={`${selectedMatch.id}-${participant.side}-${index}`}
+                              type="number"
+                              min={0}
+                              value={value}
+                              onChange={(event) => {
+                                const nextValue = event.target.value;
+                                setMatchForm((current) => {
+                                  const key =
+                                    participant.side === 'A'
+                                      ? 'participantAScores'
+                                      : 'participantBScores';
+                                  const nextScores = [...current[key]];
+                                  nextScores[index] = nextValue;
+                                  return {
+                                    ...current,
+                                    [key]: nextScores,
+                                  };
+                                });
+                              }}
+                            />
+                          ))}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state compact-empty">
+                    Select a match to enter multi-set scores.
+                  </div>
+                )}
+
+                <button className="primary-button" type="submit" disabled={saving || !selectedMatch}>
+                  Save score
                 </button>
               </form>
 
               <div className="panel-form">
-                <h3>赛事管理</h3>
+                <h3>Tournament Management</h3>
                 <div className="admin-list">
                   {manageableTournaments.length === 0 ? (
-                    <p>暂无赛事。</p>
+                    <p>No tournaments created yet.</p>
                   ) : (
                     manageableTournaments.map((tournament) => (
                       <div className="admin-list-item" key={tournament.id}>
                         <div>
                           <strong>{tournament.name}</strong>
                           <p>
-                            {tournament.mode === 'KNOCKOUT' ? '淘汰赛' : '小组循环赛'} ·{' '}
-                            {tournament.eventType === 'SINGLES' ? '单打' : '双打'}
+                            {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
+                            {getMatchFormatLabel(tournament.matchFormat)}
                           </p>
                         </div>
                         <button
@@ -1258,11 +1681,28 @@ function App() {
                           onClick={() => void deleteTournament(tournament.id)}
                           type="button"
                         >
-                          删除
+                          Delete
                         </button>
                       </div>
                     ))
                   )}
+                </div>
+              </div>
+
+              <div className="panel-form">
+                <h3>Existing Entries Snapshot</h3>
+                <div className="admin-list">
+                  {entries.slice(0, 12).map((entry) => (
+                    <div className="entry-snapshot-row" key={entry.id}>
+                      <strong>{optionLabelForEntry(entry, playerMap, teamMap)}</strong>
+                      <span>
+                        {entry.groupName ? `${entry.groupName} · ` : ''}
+                        Seed {entry.seed ?? '-'}
+                        {entry.teamOrder ? ` · Team #${entry.teamOrder}` : ''}
+                      </span>
+                    </div>
+                  ))}
+                  {entries.length > 12 ? <p>Showing 12 of {entries.length} entries.</p> : null}
                 </div>
               </div>
             </div>
