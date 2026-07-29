@@ -501,7 +501,7 @@ thead th {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 10px 10px 10px 12px;
   border: 1px solid #d6e2da;
   border-radius: 999px;
   background: #f8fbf9;
@@ -520,6 +520,11 @@ thead th {
   transform: translateY(-1px);
 }
 
+.checkbox-chip-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .seed-order-badge,
 .selected-order-chip {
   display: inline-flex;
@@ -531,6 +536,48 @@ thead th {
   color: #ffffff;
   font-size: 12px;
   font-weight: 700;
+}
+
+.selected-order-chip {
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.chip-remove-button,
+.selected-chip-remove {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.chip-remove-button:hover,
+.selected-chip-remove:hover {
+  color: #dc2626;
+  background: rgba(254, 226, 226, 0.9);
+  transform: scale(1.05);
+}
+
+.chip-remove-button:disabled,
+.selected-chip-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
 }
 
 .selected-order-panel {
@@ -642,6 +689,42 @@ thead th {
   line-height: 1.4;
   color: #0f172a;
   overflow-wrap: anywhere;
+}
+
+.team-lineup-editor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #dbe6df;
+  border-radius: 16px;
+  background: #f8fbf9;
+}
+
+.team-lineup-editor-head,
+.team-lineup-side,
+.team-lineup-selects,
+.team-lineup-select {
+  display: grid;
+  gap: 8px;
+}
+
+.team-lineup-editor-head span,
+.team-lineup-select span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.team-lineup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.team-lineup-side {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid #dbe6df;
+  background: #ffffff;
 }
 
 .team-preview-row {
@@ -774,6 +857,7 @@ thead th {
   .team-preview-grid,
   .team-battle-summary,
   .team-duel-summary,
+  .team-lineup-grid,
   .team-submatch-body {
     grid-template-columns: 1fr;
   }

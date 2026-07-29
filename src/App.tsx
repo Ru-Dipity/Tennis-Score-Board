@@ -254,6 +254,10 @@ function App() {
     () => new Map(teams.map((team) => [team.id, team])),
     [teams],
   );
+  const entryMap = useMemo(
+    () => new Map(entries.map((entry) => [entry.id, entry])),
+    [entries],
+  );
 
   const availableParticipantOptions = useMemo(() => {
     if (tournamentForm.eventType === 'DOUBLES') {
@@ -485,6 +489,13 @@ function App() {
     setTournamentForm((current) => ({
       ...current,
       selectedParticipantIds: shuffleSelectedParticipants(current.selectedParticipantIds),
+    }));
+  }
+
+  function unselectParticipant(participantId: string) {
+    setTournamentForm((current) => ({
+      ...current,
+      selectedParticipantIds: current.selectedParticipantIds.filter((id) => id !== participantId),
     }));
   }
 
@@ -1170,6 +1181,120 @@ function App() {
     }
   }
 
+  async function deleteTeam(teamId: string) {
+    if (!isAdmin) {
+      return;
+    }
+
+    const team = teams.find((item) => item.id === teamId);
+    const linkedEntries = entries.filter((entry) => entry.teamId === teamId);
+    const isSelected = tournamentForm.selectedParticipantIds.includes(teamId);
+
+    if (isSelected) {
+      unselectParticipant(teamId);
+      setStatusMessage(`Team "${team?.name ?? 'Unknown'}" removed from the current selection.`);
+      return;
+    }
+
+    if (linkedEntries.length) {
+      setStatusMessage(
+        `Cannot delete ${team?.name ?? 'this team'} because it is already used in a tournament entry.`,
+      );
+      return;
+    }
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      await client.models.Team.delete({ id: teamId } as any, authModeForAdmin(true));
+      setTeams((current) => removeLocalItem(current, teamId));
+      setStatusMessage(`Team "${team?.name ?? 'Unknown'}" deleted successfully.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete team.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function getTeamBattleEntriesForSide(match: Match, side: WinnerSide) {
+    const teamLabel = side === 'A' ? match.participantATeamLabel : match.participantBTeamLabel;
+    return entries
+      .filter((entry) => entry.tournamentId === match.tournamentId && entry.groupName === teamLabel)
+      .sort((left, right) => {
+        const orderDiff = (left.teamOrder ?? 0) - (right.teamOrder ?? 0);
+        if (orderDiff !== 0) {
+          return orderDiff;
+        }
+        return (left.seed ?? 0) - (right.seed ?? 0);
+      });
+  }
+
+  function formatTeamBattleParticipantName(entryIds: string[], matchCategory: string) {
+    const resolvedEntries = entryIds
+      .map((entryId) => entryMap.get(entryId))
+      .filter(isAmplifyListItem);
+
+    if (!resolvedEntries.length) {
+      return null;
+    }
+
+    if (matchCategory === 'TEAM_DOUBLES') {
+      return resolvedEntries.map((entry) => entry.entryName).join(' / ');
+    }
+
+    const [entry] = resolvedEntries;
+    return `${entry.entryName} (#${entry.teamOrder ?? entry.slotNumber ?? 1})`;
+  }
+
+  async function updateTeamBattleLineup(
+    match: Match,
+    side: WinnerSide,
+    nextEntryIds: string[],
+  ) {
+    if (!isAdmin) {
+      return;
+    }
+
+    const uniqueEntryIds = Array.from(new Set(nextEntryIds.filter(Boolean)));
+    const requiredCount = match.matchCategory === 'TEAM_DOUBLES' ? 2 : 1;
+
+    if (uniqueEntryIds.length !== requiredCount) {
+      return;
+    }
+
+    const participantName = formatTeamBattleParticipantName(uniqueEntryIds, match.matchCategory);
+    if (!participantName) {
+      return;
+    }
+
+    const prefix = side === 'A' ? 'participantA' : 'participantB';
+    const updatePayload: any = {
+      id: match.id,
+      [`${prefix}EntryIds`]: uniqueEntryIds,
+      [`${prefix}EntryId`]: uniqueEntryIds.length === 1 ? uniqueEntryIds[0] : null,
+      [`${prefix}Name`]: participantName,
+    };
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      const { data } = await client.models.Match.update(
+        updatePayload as any,
+        authModeForAdmin(true),
+      );
+      setMatches((current) =>
+        mergeMatchState(current, match.id, updatePayload, data as Match | null),
+      );
+      setStatusMessage('Team battle lineup updated.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update lineup.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function renderParticipantRow(
     match: Match,
     side: WinnerSide,
@@ -1261,6 +1386,98 @@ function App() {
         </div>
       </div>
     );
+  }
+
+  function renderTeamBattleLineupSelect(match: Match, side: WinnerSide, slotIndex: number) {
+    const teamEntries = getTeamBattleEntriesForSide(match, side);
+    const selectedEntryIds = getParticipantEntryIds(match, side);
+    const requiredCount = match.matchCategory === 'TEAM_DOUBLES' ? 2 : 1;
+    const normalizedSelection = Array.from({ length: requiredCount }, (_, index) =>
+      selectedEntryIds[index] ?? '',
+    );
+    const currentValue = normalizedSelection[slotIndex] ?? '';
+    const reservedIds = normalizedSelection.filter(
+      (entryId, index) => entryId && index !== slotIndex,
+    );
+
+    return (
+      <label className="team-lineup-select" key={`${match.id}-${side}-${slotIndex}`}>
+        <span>
+          {match.matchCategory === 'TEAM_DOUBLES'
+            ? `Player ${slotIndex + 1}`
+            : 'Assigned player'}
+        </span>
+        <select
+          value={currentValue}
+          disabled={saving || match.status === 'COMPLETED'}
+          onChange={(event) => {
+            const nextEntryIds = [...normalizedSelection];
+            nextEntryIds[slotIndex] = event.target.value;
+            void updateTeamBattleLineup(match, side, nextEntryIds);
+          }}
+        >
+          <option value="">Select player</option>
+          {teamEntries
+            .filter((entry) => entry.id === currentValue || !reservedIds.includes(entry.id))
+            .map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                #{entry.teamOrder ?? entry.slotNumber ?? 1} {entry.entryName}
+              </option>
+            ))}
+        </select>
+      </label>
+    );
+  }
+
+  function renderTeamBattleLineupEditor(match: Match) {
+    if (match.stage !== 'TEAM_BATTLE') {
+      return null;
+    }
+
+    const slotCount = match.matchCategory === 'TEAM_DOUBLES' ? 2 : 1;
+
+    return (
+      <div className="team-lineup-editor">
+        <div className="team-lineup-editor-head">
+          <strong>Adjust lineup before scoring</strong>
+          <span>
+            {match.status === 'COMPLETED'
+              ? 'Clear the score first to change this completed lineup.'
+              : 'Selections update the match card immediately.'}
+          </span>
+        </div>
+        <div className="team-lineup-grid">
+          {(['A', 'B'] as WinnerSide[]).map((side) => (
+            <div className="team-lineup-side" key={`${match.id}-${side}`}>
+              <strong>
+                {side === 'A' ? match.participantATeamLabel || 'Team A' : match.participantBTeamLabel || 'Team B'}
+              </strong>
+              <div className="team-lineup-selects">
+                {Array.from({ length: slotCount }, (_, index) =>
+                  renderTeamBattleLineupSelect(match, side, index),
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  async function handleParticipantChipRemove(participantId: string) {
+    const isSelected = tournamentForm.selectedParticipantIds.includes(participantId);
+    if (isSelected) {
+      unselectParticipant(participantId);
+      setStatusMessage('Selection updated.');
+      return;
+    }
+
+    if (tournamentForm.eventType === 'DOUBLES') {
+      await deleteTeam(participantId);
+      return;
+    }
+
+    await deletePlayer(participantId);
   }
 
   return (
@@ -1861,8 +2078,30 @@ function App() {
                               toggleParticipantSelection(participant.id, event.target.checked)
                             }
                           />
-                          <span>{participant.name}</span>
+                          <span className="checkbox-chip-label">{participant.name}</span>
                           {seedOrder ? <span className="seed-order-badge">#{seedOrder}</span> : null}
+                          <button
+                            className="chip-remove-button"
+                            type="button"
+                            aria-label={
+                              seedOrder
+                                ? `Remove ${participant.name} from selection`
+                                : `Delete ${participant.name}`
+                            }
+                            title={
+                              seedOrder
+                                ? 'Remove from current selection'
+                                : 'Delete this saved entry'
+                            }
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              void handleParticipantChipRemove(participant.id);
+                            }}
+                            disabled={saving}
+                          >
+                            ×
+                          </button>
                         </label>
                       );
                     })}
@@ -1874,7 +2113,18 @@ function App() {
                       <div className="selected-order-chips">
                         {selectedParticipants.map((participant) => (
                           <span className="selected-order-chip" key={participant.id}>
-                            #{participant.order} {participant.name}
+                            <span>
+                              #{participant.order} {participant.name}
+                            </span>
+                            <button
+                              className="selected-chip-remove"
+                              type="button"
+                              aria-label={`Remove ${participant.name} from selection`}
+                              onClick={() => unselectParticipant(participant.id)}
+                              disabled={saving}
+                            >
+                              ×
+                            </button>
                           </span>
                         ))}
                       </div>
@@ -1935,6 +2185,8 @@ function App() {
                         {getMatchFormatLabel(selectedMatchFormat)} · {selectedMatch.status}
                       </span>
                     </div>
+
+                    {renderTeamBattleLineupEditor(selectedMatch)}
 
                     <div className="set-entry-header">
                       <span>Entry</span>
