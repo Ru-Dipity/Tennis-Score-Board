@@ -71,6 +71,11 @@ const schema = a.schema({
       groupName: a.string(),
       slotNumber: a.integer(),
       isBye: a.boolean().required(),
+      
+      // 🌟 核心补齐：在这里加上 Match 中三个外键的反向 hasMany 关联
+      matchesAsParticipantA: a.hasMany('Match', 'participantAEntryId'),
+      matchesAsParticipantB: a.hasMany('Match', 'participantBEntryId'),
+      matchesAsWinner: a.hasMany('Match', 'winnerEntryId'),
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
@@ -88,14 +93,18 @@ const schema = a.schema({
       matchNumber: a.integer().required(),
       displayOrder: a.integer().required(),
       groupName: a.string(),
+      
       participantAEntryId: a.id(),
       participantAEntry: a.belongsTo('TournamentEntry', 'participantAEntryId'),
       participantAName: a.string(),
+      
       participantBEntryId: a.id(),
       participantBEntry: a.belongsTo('TournamentEntry', 'participantBEntryId'),
       participantBName: a.string(),
+      
       winnerEntryId: a.id(),
       winnerEntry: a.belongsTo('TournamentEntry', 'winnerEntryId'),
+      
       score: a.string(),
       completedAt: a.string(),
     })
