@@ -1,75 +1,419 @@
-# React + TypeScript + Vite
+# Tennis Score Board
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Tennis Score Board is a React + TypeScript + Vite application backed by AWS Amplify Gen 2. It provides a public, real-time tournament display for visitors and an authenticated admin console for managing players, teams, tournaments, brackets, round-robin groups, and match results.
 
-Currently, two official plugins are available:
+## Full Project Structure
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```text
+/root/tennis-score-board
+├── amplify
+│   ├── auth
+│   │   └── resource.ts
+│   ├── data
+│   │   └── resource.ts
+│   ├── backend.ts
+│   ├── package.json
+│   └── tsconfig.json
+├── public
+│   ├── favicon.svg
+│   └── icons.svg
+├── src
+│   ├── assets
+│   │   ├── hero.png
+│   │   ├── react.svg
+│   │   └── vite.svg
+│   ├── lib
+│   │   └── tournament.ts
+│   ├── App.css
+│   ├── App.tsx
+│   ├── index.css
+│   └── main.tsx
+├── dist
+│   ├── assets
+│   │   ├── index-Bh4CaSbx.js
+│   │   └── index-CUA1dq05.css
+│   ├── favicon.svg
+│   ├── icons.svg
+│   └── index.html
+├── amplify_outputs.json
+├── amplify.yml
+├── eslint.config.js
+├── .gitignore
+├── index.html
+├── package.json
+├── package-lock.json
+├── README.md
+├── tsconfig.app.json
+├── tsconfig.json
+├── tsconfig.node.json
+└── vite.config.ts
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Directory and File Responsibilities
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+### 1. `amplify/` - Backend Definition Layer
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+This directory contains the Amplify Gen 2 backend source code. It defines authentication, GraphQL data models, and the backend entry point.
 
-```
+#### `amplify/backend.ts`
+- Backend composition entry file.
+- Wires together the auth resource and the data resource.
+- If a new backend category is added later, such as storage or functions, this is one of the first places that will change.
+
+#### `amplify/auth/resource.ts`
+- Defines the authentication resource with email-based sign-in.
+- Supports the admin login flow used by the management console.
+- Future changes here usually involve:
+  - changing sign-in methods,
+  - adding MFA,
+  - adding user group automation,
+  - tightening login policies.
+
+#### `amplify/data/resource.ts`
+- Core backend schema definition for business data.
+- Defines enums and models such as:
+  - `Player`
+  - `Team`
+  - `Tournament`
+  - `TournamentEntry`
+  - `Match`
+- Also defines authorization behavior:
+  - public API key read access for visitor screens,
+  - `admin` group write access for management operations.
+- This is the most important backend business file in the project.
+
+#### `amplify/package.json`
+- Backend package manifest for Amplify-specific dependencies.
+- Usually touched only when backend tooling or Amplify resource dependencies change.
+
+#### `amplify/tsconfig.json`
+- TypeScript configuration for backend resource files.
+- Mostly framework-level configuration rather than business logic.
+
+### 2. `src/` - Frontend Application Source
+
+This directory contains the actual React application, including app bootstrap, UI rendering, styling, and tournament logic.
+
+#### `src/main.tsx`
+- Frontend entry point.
+- Boots React, loads global CSS, imports Amplify UI styles, and configures Amplify with `amplify_outputs.json`.
+- If the application fails to start or Amplify is not initialized correctly, this is a key file to inspect first.
+
+#### `src/App.tsx`
+- Main application container and the central frontend business file.
+- Handles:
+  - real-time subscriptions via Amplify Data `observeQuery()`,
+  - visitor-facing tournament display,
+  - admin authentication checks,
+  - player creation,
+  - doubles team creation,
+  - tournament creation,
+  - match score entry,
+  - knockout winner propagation,
+  - tournament deletion.
+- This is the main orchestration layer between backend data and UI.
+
+#### `src/lib/tournament.ts`
+- Pure tournament utility module.
+- Contains reusable business logic for:
+  - knockout bracket generation,
+  - round label generation,
+  - round-robin group setup,
+  - score parsing,
+  - standings calculation,
+  - matrix/table formatting helpers.
+- If bracket rules or ranking rules need to change, this is the primary file to update.
+
+#### `src/App.css`
+- Main component-level styling for the whole app.
+- Defines layout and visual styling for:
+  - hero banner,
+  - visitor tournament cards,
+  - bracket UI,
+  - round-robin tables,
+  - admin console,
+  - forms and buttons.
+
+#### `src/index.css`
+- Global stylesheet.
+- Sets base typography, background, reset-like defaults, and shared browser-level styles.
+
+#### `src/assets/`
+- Stores local frontend image assets.
+- Currently includes visual/static resources, not core business logic.
+- Safe to update for branding or UI polish.
+
+### 3. `public/` - Static Public Assets
+
+Files here are copied directly into the built app without bundler transformation.
+
+#### `public/favicon.svg`
+- Browser tab icon.
+
+#### `public/icons.svg`
+- Shared static icon asset.
+
+### 4. `dist/` - Build Output
+
+This directory is generated by `npm run build`.
+
+#### `dist/index.html`
+- Production HTML shell generated by Vite.
+
+#### `dist/assets/*`
+- Bundled JavaScript and CSS output.
+- These files should not be edited manually.
+
+#### `dist/favicon.svg` and `dist/icons.svg`
+- Built copies of public assets.
+
+### 5. Root-Level Project Configuration Files
+
+#### `package.json`
+- Main frontend package manifest.
+- Defines app scripts such as:
+  - `npm run dev`
+  - `npm run build`
+  - `npm run lint`
+- Also defines frontend dependency versions.
+
+#### `package-lock.json`
+- Dependency lock file.
+- Ensures consistent installs across environments.
+- Should be committed together with `package.json` when dependencies change.
+
+#### `index.html`
+- Vite HTML template for local and production builds.
+- The React app mounts into the root DOM node defined here.
+
+#### `vite.config.ts`
+- Vite bundler configuration.
+- Currently lightweight, only enabling the React plugin.
+- This file becomes important if you later add:
+  - aliases,
+  - manual chunk splitting,
+  - environment-specific build behavior,
+  - proxy rules.
+
+#### `eslint.config.js`
+- ESLint flat config file.
+- Controls code quality rules for the frontend and backend TypeScript files.
+
+#### `tsconfig.json`
+- Base TypeScript configuration for the project.
+
+#### `tsconfig.app.json`
+- TypeScript configuration used for app source files under `src/`.
+
+#### `tsconfig.node.json`
+- TypeScript configuration for Node-side tooling files such as Vite config.
+
+#### `amplify.yml`
+- AWS Amplify Hosting build pipeline config.
+- Defines:
+  - backend deploy phase with `npx ampx pipeline-deploy`,
+  - frontend build phase with `npm run build`,
+  - artifact directory as `dist`.
+- This file is critical for CI/CD and cloud deployment.
+
+#### `amplify_outputs.json`
+- Generated Amplify output file used by the frontend runtime.
+- Contains environment-specific backend connection info.
+- Imported by `src/main.tsx`.
+- Usually generated by Amplify tooling and should not be hand-edited.
+
+#### `.gitignore`
+- Git ignore rules.
+- Controls which generated or local-only files should stay out of version control.
+
+## Core Business Mapping by Module
+
+### App Entry and Runtime Bootstrap
+- `src/main.tsx`
+- `index.html`
+
+These files are responsible for launching the React app and connecting it to Amplify runtime outputs.
+
+### Backend Data Model and Permissions
+- `amplify/data/resource.ts`
+- `amplify/auth/resource.ts`
+- `amplify/backend.ts`
+
+These files define what data exists, who can read or write it, and which backend resources are enabled.
+
+### Visitor-Facing Real-Time UI
+- `src/App.tsx`
+- `src/App.css`
+
+These files power the public display for live tournaments, bracket views, standings, and history records.
+
+### Admin Console and Write Operations
+- `src/App.tsx`
+- `amplify/auth/resource.ts`
+- `amplify/data/resource.ts`
+
+These files collectively support authenticated admin workflows such as creating players, teams, tournaments, and entering scores.
+
+### Tournament Rule Engine and Data Processing
+- `src/lib/tournament.ts`
+
+This file encapsulates the main business calculations and is the best place to keep algorithmic logic out of the UI layer.
+
+### Styling and Visual Layer
+- `src/App.css`
+- `src/index.css`
+- `src/assets/*`
+- `public/*`
+
+These files control appearance, layout, branding assets, and shared visuals.
+
+### Build, Lint, and Deployment
+- `package.json`
+- `vite.config.ts`
+- `eslint.config.js`
+- `amplify.yml`
+- `tsconfig*.json`
+
+These files control developer workflow, build behavior, code quality checks, and deployment automation.
+
+## Quick Modification Guide
+
+This section is meant to help future changes land in the right place quickly.
+
+### A. Change Data Models, Relationships, or Permissions
+
+**File to edit**
+- `amplify/data/resource.ts`
+
+**Typical changes**
+- add new fields to players, teams, tournaments, or matches
+- add new models
+- change public vs admin permissions
+- change tournament metadata
+
+**Notes**
+- Schema changes affect both backend deployment and frontend generated types.
+- After changing this file, regenerate/redeploy Amplify resources before expecting the frontend to work correctly.
+- Be careful with authorization changes because the visitor display depends on public read access.
+
+### B. Change Login or Admin Access Rules
+
+**File to edit**
+- `amplify/auth/resource.ts`
+
+**Typical changes**
+- add new auth methods
+- change sign-in flow
+- introduce MFA
+- align Cognito behavior with new admin rules
+
+**Notes**
+- The frontend admin experience assumes an `admin` group exists.
+- If auth rules are changed, also verify the admin checks in `src/App.tsx`.
+
+### C. Change Tournament Algorithms
+
+**File to edit**
+- `src/lib/tournament.ts`
+
+**Typical changes**
+- different knockout seeding logic
+- different round naming rules
+- different group allocation logic
+- different ranking/tie-break logic
+- custom score parsing rules
+
+**Notes**
+- Keep pure calculation logic here instead of mixing it into UI code.
+- Verify both knockout and round-robin flows after modifying this file.
+- Tie-break changes should be tested carefully because they affect live standings.
+
+### D. Change Admin Operations or Real-Time UI Behavior
+
+**File to edit**
+- `src/App.tsx`
+
+**Typical changes**
+- add new admin forms
+- split the page into smaller components
+- change how subscriptions are handled
+- add edit flows for existing players or tournaments
+- change how scores update later rounds
+
+**Notes**
+- This file currently contains both visitor UI and admin UI.
+- It is the most likely file to be refactored into multiple components later.
+- If you adjust match update logic, pay attention to knockout cascade behavior so later rounds do not show stale winners.
+
+### E. Change Styling or Branding
+
+**Files to edit**
+- `src/App.css`
+- `src/index.css`
+- `src/assets/*`
+- `public/*`
+
+**Typical changes**
+- new colors
+- new page layout
+- responsive behavior
+- icons and logos
+
+**Notes**
+- `src/App.css` contains most app-specific styles.
+- `src/index.css` should remain focused on global/base styles.
+
+### F. Change App Bootstrap or Amplify Runtime Wiring
+
+**Files to edit**
+- `src/main.tsx`
+- `amplify_outputs.json`
+
+**Notes**
+- `amplify_outputs.json` is generated, not a hand-maintained source file.
+- If runtime configuration looks broken, confirm that the outputs file matches the deployed backend.
+
+### G. Change CI/CD or Cloud Build Behavior
+
+**File to edit**
+- `amplify.yml`
+
+**Typical changes**
+- install/build commands
+- artifact directory
+- caching strategy
+- branch-specific deployment behavior
+
+**Notes**
+- Do not remove `npx ampx pipeline-deploy` unless the backend deployment strategy changes intentionally.
+
+## Suggested Refactor Priorities
+
+For future maintenance, the following files are the most likely to benefit from refactoring:
+
+1. `src/App.tsx`
+   - currently acts as the main page, data layer, admin layer, and orchestration layer
+   - a future split into `components/`, `hooks/`, and `features/` would improve maintainability
+
+2. `src/lib/tournament.ts`
+   - should remain the home of tournament-specific rules
+   - as business rules grow, it may be worth splitting into:
+     - `knockout.ts`
+     - `roundRobin.ts`
+     - `score.ts`
+     - `standings.ts`
+
+3. `amplify/data/resource.ts`
+   - as the domain grows, this file will become the authoritative backend contract
+   - any schema growth should be documented carefully because it impacts both deployment and frontend integration
+
+## Summary
+
+If you need to understand this project quickly, focus on the following order:
+
+1. `amplify/data/resource.ts` for backend data structure and permissions
+2. `src/lib/tournament.ts` for tournament rules and calculations
+3. `src/App.tsx` for runtime behavior, UI flow, and admin operations
+4. `amplify.yml` and `package.json` for build and deployment workflow
+
+That sequence gives the fastest path to understanding how data is modeled, how it is processed, how it is rendered, and how it is deployed.
