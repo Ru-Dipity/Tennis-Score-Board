@@ -1196,7 +1196,14 @@ function App() {
       return;
     }
 
-    if (linkedEntries.length) {
+    // Only consider entries that belong to tournaments that still exist.
+    // Entries from deleted tournaments may linger in local state due to
+    // race conditions between observeQuery subscriptions and setEntries.
+    const activeLinkedEntries = linkedEntries.filter((entry) =>
+      tournaments.some((t) => t.id === entry.tournamentId),
+    );
+
+    if (activeLinkedEntries.length) {
       setStatusMessage(
         `Cannot delete ${team?.name ?? 'this team'} because it is already used in a tournament entry.`,
       );
@@ -1339,6 +1346,15 @@ function App() {
     const participantName = side === 'A' ? match.participantAName : match.participantBName;
     const teamLabel = side === 'A' ? match.participantATeamLabel : match.participantBTeamLabel;
     const scores = getScoreList(match, side);
+    const isDoubles = match.matchCategory === 'TEAM_DOUBLES';
+
+    // For doubles, split "name1 / name2" into separate <span> elements
+    // so CSS .team-submatch-player-name + .team-submatch-player-name can stack them.
+    const playerNames: string[] = isDoubles && participantName
+      ? participantName.split(' / ').filter(Boolean)
+      : participantName
+        ? [participantName]
+        : ['TBD'];
 
     return (
       <div
@@ -1346,7 +1362,11 @@ function App() {
       >
         <span className="team-submatch-team-label">{teamLabel || 'Team TBD'}</span>
         <div className="team-submatch-player-block">
-          <span className="team-submatch-player-name">{participantName || 'TBD'}</span>
+          {playerNames.map((name, idx) => (
+            <span className="team-submatch-player-name" key={`${match.id}-${side}-name-${idx}`}>
+              {name}
+            </span>
+          ))}
           <div className="participant-badges">
             {isWinner ? <span className="inline-badge winner-badge">✓ Winner</span> : null}
           </div>

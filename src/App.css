@@ -588,48 +588,102 @@ thead th {
   border-top: 1px solid #e2e8f0;
 }
 
-.team-preview-grid,
-.team-battle-summary {
+.team-preview-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
+/* ── Team Battle Summary (Header Cards) ── */
+
+.team-battle-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.team-summary-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid #dbe6df;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
+}
+
+.team-summary-winner {
+  border-color: rgba(22, 163, 74, 0.45);
+  background: linear-gradient(135deg, rgba(220, 252, 231, 0.9), #ffffff);
+}
+
+.team-summary-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.team-summary-stats span {
+  white-space: nowrap;
+}
+
+.team-summary-stats strong {
+  color: #0f172a;
+}
+
+/* ── Team Battle Duel Cards ── */
+
 .team-duel-grid {
   display: grid;
-  gap: 16px;
+  gap: 12px;
 }
 
 .team-duel-card {
   display: grid;
-  gap: 14px;
-  padding: 16px;
-  border-radius: 18px;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
   border: 1px solid #dbe6df;
   background: #f8fbf9;
 }
 
 .team-duel-summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+/* ── Team Battle Match Card (PC: horizontal 3-column) ── */
+
+.team-submatch-card {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid #d8e4db;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.03);
 }
 
 .team-submatch-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(132px, 180px) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
   align-items: stretch;
 }
 
+/* ── Side panels (Player A / Player B) ── */
+
 .team-submatch-side {
   display: grid;
-  gap: 10px;
+  gap: 4px;
   min-width: 0;
-  padding: 14px;
-  border-radius: 16px;
-  border: 1px solid #dbe6df;
-  background: #ffffff;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #e4ece7;
+  background: #fafdfb;
 }
 
 .team-submatch-side-a {
@@ -645,26 +699,33 @@ thead th {
   background: linear-gradient(135deg, rgba(220, 252, 231, 0.82), #ffffff);
 }
 
-.team-submatch-team-label,
-.team-submatch-format {
-  font-size: 12px;
+.team-submatch-team-label {
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #64748b;
+  line-height: 1.3;
 }
 
 .team-submatch-player-block {
   display: grid;
-  gap: 8px;
+  gap: 2px;
 }
 
 .team-submatch-player-name {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 700;
-  line-height: 1.5;
+  line-height: 1.4;
   color: #0f172a;
   overflow-wrap: anywhere;
+}
+
+/* Doubles: two player names stacked tightly */
+.team-submatch-player-name + .team-submatch-player-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
 }
 
 .team-submatch-side-b .participant-badges,
@@ -672,23 +733,41 @@ thead th {
   justify-content: flex-end;
 }
 
+/* ── Center scoreboard ── */
+
 .team-submatch-scoreboard {
   display: grid;
-  gap: 10px;
+  gap: 4px;
   align-content: center;
   justify-items: center;
-  padding: 14px 12px;
-  border-radius: 16px;
+  padding: 8px 10px;
+  border-radius: 10px;
   border: 1px solid #dbe6df;
   background: linear-gradient(180deg, #ffffff, #f8fbf9);
   text-align: center;
+  min-width: 100px;
+}
+
+.team-submatch-format {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+  line-height: 1.3;
 }
 
 .team-submatch-score {
-  font-size: 18px;
-  line-height: 1.4;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.3;
   color: #0f172a;
   overflow-wrap: anywhere;
+}
+
+.team-submatch-scoreboard .status-pill {
+  padding: 3px 8px;
+  font-size: 10px;
 }
 
 .team-lineup-editor {
@@ -745,30 +824,6 @@ thead th {
 
 .team-preview-empty {
   margin: 0;
-  color: #64748b;
-}
-
-.team-summary-card {
-  gap: 12px;
-}
-
-.team-summary-winner {
-  border-color: rgba(22, 163, 74, 0.45);
-  background: linear-gradient(135deg, rgba(220, 252, 231, 0.9), #ffffff);
-}
-
-.team-summary-stats {
-  display: grid;
-  gap: 8px;
-  color: #334155;
-}
-
-.team-submatch-head strong {
-  font-size: 15px;
-}
-
-.team-submatch-head span {
-  font-size: 13px;
   color: #64748b;
 }
 
@@ -855,10 +910,8 @@ thead th {
   .admin-grid,
   .form-grid,
   .team-preview-grid,
-  .team-battle-summary,
   .team-duel-summary,
-  .team-lineup-grid,
-  .team-submatch-body {
+  .team-lineup-grid {
     grid-template-columns: 1fr;
   }
 
@@ -883,7 +936,9 @@ thead th {
   }
 }
 
-@media (max-width: 720px) {
+/* ── Team Battle Mobile (≤768px) ── */
+
+@media (max-width: 768px) {
   .app-shell {
     padding: 16px;
   }
@@ -910,9 +965,68 @@ thead th {
     width: 100%;
   }
 
-  .team-submatch-side,
-  .team-submatch-scoreboard {
-    width: 100%;
+  /* ── Team Summary: horizontal scrollable cards ── */
+
+  .team-battle-summary {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x mandatory;
+    padding-bottom: 4px;
+  }
+
+  .team-summary-card {
+    flex: 0 0 160px;
+    min-height: 60px;
+    scroll-snap-align: start;
+    padding: 10px 12px;
+    gap: 6px;
+    border-radius: 6px;
+  }
+
+  .team-summary-stats {
+    font-size: 11px;
+    gap: 4px 10px;
+  }
+
+  .team-summary-stats span {
+    white-space: nowrap;
+  }
+
+  /* ── Duel cards ── */
+
+  .team-duel-card {
+    padding: 10px;
+    gap: 8px;
+    border-radius: 6px;
+  }
+
+  .team-duel-summary {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 6px;
+  }
+
+  /* ── Match cards: stacked layout ── */
+
+  .team-submatch-card {
+    padding: 8px;
+    gap: 6px;
+    border-radius: 6px;
+  }
+
+  .team-submatch-body {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .team-submatch-side {
+    padding: 6px 8px;
+    border-radius: 6px;
+  }
+
+  .team-submatch-side-a {
+    text-align: left;
   }
 
   .team-submatch-side-b {
@@ -926,5 +1040,132 @@ thead th {
 
   .set-score-strip {
     justify-content: flex-start;
+  }
+
+  .team-submatch-player-name {
+    font-size: 12px;
+  }
+
+  .team-submatch-player-name + .team-submatch-player-name {
+    font-size: 11px;
+  }
+
+  /* ── Scoreboard: horizontal row on mobile ── */
+
+  .team-submatch-scoreboard {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    min-width: 0;
+  }
+
+  .team-submatch-format {
+    font-size: 9px;
+  }
+
+  .team-submatch-score {
+    font-size: 13px;
+  }
+
+  .team-submatch-scoreboard .status-pill {
+    padding: 2px 6px;
+    font-size: 9px;
+  }
+
+  /* ── Touch-friendly buttons ── */
+
+  .team-submatch-scoreboard button,
+  .team-submatch-side button {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  /* ── Lineup editor ── */
+
+  .team-lineup-editor {
+    padding: 10px;
+    border-radius: 6px;
+    gap: 8px;
+  }
+
+  .team-lineup-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .team-lineup-side {
+    padding: 8px;
+    border-radius: 6px;
+  }
+
+  .team-lineup-select {
+    gap: 4px;
+  }
+
+  .team-lineup-select select {
+    font-size: 12px;
+    padding: 4px 6px;
+  }
+}
+
+/* ── Small phones (≤480px) ── */
+
+@media (max-width: 480px) {
+  .team-summary-card {
+    flex: 0 0 140px;
+    padding: 8px 10px;
+  }
+
+  .team-summary-stats {
+    font-size: 10px;
+    gap: 2px 8px;
+  }
+
+  .team-submatch-card {
+    padding: 6px;
+  }
+
+  .team-submatch-side {
+    padding: 4px 6px;
+  }
+
+  .team-submatch-player-name {
+    font-size: 11px;
+  }
+
+  .team-submatch-player-name + .team-submatch-player-name {
+    font-size: 10px;
+  }
+
+  .team-submatch-scoreboard {
+    padding: 4px 8px;
+    gap: 4px;
+  }
+
+  .team-submatch-score {
+    font-size: 12px;
+  }
+
+  .team-submatch-format {
+    font-size: 8px;
+  }
+
+  .team-submatch-scoreboard .status-pill {
+    font-size: 8px;
+    padding: 1px 5px;
+  }
+
+  .team-submatch-scoreboard button,
+  .team-submatch-side button {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px 8px;
+    font-size: 11px;
   }
 }
