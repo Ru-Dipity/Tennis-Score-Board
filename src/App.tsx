@@ -72,22 +72,6 @@ function getMatchFormatLabel(matchFormat: MatchFormat) {
   return 'Single Set';
 }
 
-function optionLabelForEntry(
-  entry: TournamentEntry,
-  playerMap: Map<string, Player>,
-  teamMap: Map<string, Team>,
-) {
-  if (entry.teamId) {
-    return teamMap.get(entry.teamId)?.name ?? entry.entryName;
-  }
-
-  if (entry.playerId) {
-    return playerMap.get(entry.playerId)?.name ?? entry.entryName;
-  }
-
-  return entry.entryName;
-}
-
 function getScoreList(match: Match, side: WinnerSide) {
   const values =
     side === 'A' ? match.participantAScores ?? [] : match.participantBScores ?? [];
@@ -370,6 +354,11 @@ function App() {
         left.name.localeCompare(right.name, 'en'),
       ),
     [tournaments],
+  );
+
+  const manageablePlayers = useMemo(
+    () => [...players].sort((left, right) => left.name.localeCompare(right.name, 'en')),
+    [players],
   );
 
   const selectedMatch = useMemo(
@@ -1095,6 +1084,47 @@ function App() {
         });
       }
       setStatusMessage('Tournament deleted.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deletePlayer(playerId: string) {
+    if (!isAdmin) {
+      return;
+    }
+
+    const player = players.find((item) => item.id === playerId);
+    const linkedTeams = teams.filter(
+      (team) => team.playerOneId === playerId || team.playerTwoId === playerId,
+    );
+    const linkedEntries = entries.filter((entry) => entry.playerId === playerId);
+
+    if (linkedTeams.length || linkedEntries.length) {
+      setStatusMessage(
+        `Cannot delete ${player?.name ?? 'this player'} because they are already used in a doubles team or tournament entry.`,
+      );
+      return;
+    }
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      await client.models.Player.delete({ id: playerId } as any, authModeForAdmin(true));
+      setPlayers((current) => removeLocalItem(current, playerId));
+      setTeamForm((current) => ({
+        ...current,
+        playerOneId: current.playerOneId === playerId ? '' : current.playerOneId,
+        playerTwoId: current.playerTwoId === playerId ? '' : current.playerTwoId,
+      }));
+      setTournamentForm((current) => ({
+        ...current,
+        selectedParticipantIds: current.selectedParticipantIds.filter((id) => id !== playerId),
+      }));
+      setStatusMessage(`Player "${player?.name ?? 'Unknown'}" deleted successfully.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete player.';
+      setStatusMessage(message);
     } finally {
       setSaving(false);
     }
@@ -1979,19 +2009,28 @@ function App() {
               </div>
 
               <div className="panel-form">
-                <h3>Existing Entries Snapshot</h3>
+                <h3>Player Management</h3>
                 <div className="admin-list">
-                  {entries.slice(0, 12).map((entry) => (
-                    <div className="entry-snapshot-row" key={entry.id}>
-                      <strong>{optionLabelForEntry(entry, playerMap, teamMap)}</strong>
-                      <span>
-                        {entry.groupName ? `${entry.groupName} · ` : ''}
-                        Seed {entry.seed ?? '-'}
-                        {entry.teamOrder ? ` · Team #${entry.teamOrder}` : ''}
-                      </span>
-                    </div>
-                  ))}
-                  {entries.length > 12 ? <p>Showing 12 of {entries.length} entries.</p> : null}
+                  {manageablePlayers.length === 0 ? (
+                    <p>No players available.</p>
+                  ) : (
+                    manageablePlayers.map((player) => (
+                      <div className="admin-list-item" key={player.id}>
+                        <div>
+                          <strong>{player.name}</strong>
+                          <p>{String(player.gender).toLowerCase()}</p>
+                        </div>
+                        <button
+                          className="danger-button"
+                          onClick={() => void deletePlayer(player.id)}
+                          type="button"
+                          disabled={saving}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             </div>
