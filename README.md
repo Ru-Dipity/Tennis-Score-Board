@@ -28,30 +28,38 @@ flowchart LR
     B --> C["⚡ AWS Amplify CI/CD Pipeline"]
     C --> D["📦 Backend Deploy<br/><code>npx ampx pipeline-deploy</code>"]
     C --> E["🎨 Frontend Build<br/><code>npm run build</code>"]
-    D --> F["🛢️ AWS AppSync<br/>GraphQL API"]
-    D --> G["🔐 Amazon Cognito<br/>User Pools"]
-    D --> K["🗄️ Amazon DynamoDB<br/>(Managed NoSQL)"]
-    D --> L["📋 AWS CloudFormation<br/>(IaC Orchestration)"]
-    E --> H["☁️ Amazon CloudFront CDN"]
-    H --> I["🌐 Custom DNS<br/>(CNAME + ACM SSL)"]
-    I --> J["🖥️ User Browser"]
-    F --> K
-    F --> H
-    G --> H
+
+    D --> F["📋 AWS CloudFormation<br/>(IaC Orchestration)"]
+    F --> G["🛢️ AWS AppSync<br/>GraphQL API"]
+    F --> H["🔐 Amazon Cognito<br/>User Pools"]
+    F --> I["🗄️ Amazon DynamoDB<br/>(Managed NoSQL)"]
+
+    E --> J["☁️ Amazon CloudFront CDN"]
+    J --> K["🌐 Custom DNS<br/>(CNAME + ACM SSL)"]
+    K --> L["🖥️ User Browser"]
+
+    G -.->|Runtime<br/>Data Access| I
+    G --> J
+    H --> J
 
     style A fill:#58a6ff,color:#fff
     style B fill:#2dba4e,color:#fff
     style C fill:#ff9900,color:#fff
     style D fill:#ff9900,color:#fff
     style E fill:#646cff,color:#fff
-    style F fill:#8b5cf6,color:#fff
-    style G fill:#f97316,color:#fff
-    style H fill:#232f3e,color:#fff
-    style I fill:#e11d48,color:#fff
-    style J fill:#22c55e,color:#fff
-    style K fill:#3b82f6,color:#fff
-    style L fill:#a855f7,color:#fff
+    style F fill:#a855f7,color:#fff
+    style G fill:#8b5cf6,color:#fff
+    style H fill:#f97316,color:#fff
+    style I fill:#3b82f6,color:#fff
+    style J fill:#232f3e,color:#fff
+    style K fill:#e11d48,color:#fff
+    style L fill:#22c55e,color:#fff
 ```
+
+**Legend:**
+- `-->` **Solid arrow** = Deployment / provisioning flow
+- `-.->
+` **Dashed arrow** = Runtime data flow
 
 ---
 
@@ -262,7 +270,7 @@ frontend:
 
 **Pipeline Flow:**
 1. **Trigger**: Push to `main` branch.
-2. **Backend Phase**: Installs dependencies, synthesizes CDK app into CloudFormation templates, deploys stacks (Cognito, AppSync, DynamoDB tables).
+2. **Backend Phase**: Installs dependencies, synthesizes CDK app into CloudFormation templates, deploys CloudFormation stacks which **provision** Cognito user pools, AppSync GraphQL API, and DynamoDB tables.
 3. **Frontend Phase**: Installs dependencies, runs `tsc` type-check, bundles with Vite.
 4. **Artifact**: Outputs `dist/` to Amplify hosting.
 5. **Serving**: Amplify uploads to S3 → invalidates CloudFront cache → global rollout.
