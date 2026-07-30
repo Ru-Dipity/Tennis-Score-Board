@@ -9,7 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vite.dev/)
 [![AWS CDK](https://img.shields.io/badge/AWS%20CDK-Infrastructure%20as%20Code-232F3E?style=for-the-badge&logo=amazon-aws&logoColor=white)](https://aws.amazon.com/cdk/)
-[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/LICENSE)
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Online-brightgreen?style=for-the-badge&logo=google-chrome&logoColor=white)](https://your-domain.com)
 
 ---
@@ -30,9 +30,12 @@ flowchart LR
     C --> E["🎨 Frontend Build<br/><code>npm run build</code>"]
     D --> F["🛢️ AWS AppSync<br/>GraphQL API"]
     D --> G["🔐 Amazon Cognito<br/>User Pools"]
+    D --> K["🗄️ Amazon DynamoDB<br/>(Managed NoSQL)"]
+    D --> L["📋 AWS CloudFormation<br/>(IaC Orchestration)"]
     E --> H["☁️ Amazon CloudFront CDN"]
     H --> I["🌐 Custom DNS<br/>(CNAME + ACM SSL)"]
     I --> J["🖥️ User Browser"]
+    F --> K
     F --> H
     G --> H
 
@@ -46,6 +49,8 @@ flowchart LR
     style H fill:#232f3e,color:#fff
     style I fill:#e11d48,color:#fff
     style J fill:#22c55e,color:#fff
+    style K fill:#3b82f6,color:#fff
+    style L fill:#a855f7,color:#fff
 ```
 
 ---
@@ -54,12 +59,13 @@ flowchart LR
 
 | Capability | Implementation |
 |---|---|
-| **Serverless Hosting** | Hosted on [AWS Amplify](tennis-score-board/amplify.yml:1) with fully managed infrastructure — no servers to provision or maintain. |
+| **Serverless Hosting** | Hosted on [AWS Amplify](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify.yml) with fully managed infrastructure — no servers to provision or maintain. |
 | **Global CDN** | Content delivered via [Amazon CloudFront](https://aws.amazon.com/cloudfront/) edge locations for sub-50ms TTFB worldwide. |
-| **Automated CI/CD** | GitOps-driven pipeline: every push to `main` triggers dependency install, TypeScript compilation, Vite production build, and incremental Amplify deployment. See [`amplify.yml`](tennis-score-board/amplify.yml:1). |
+| **Automated CI/CD** | GitOps-driven pipeline: every push to `main` triggers dependency install, TypeScript compilation, Vite production build, and incremental Amplify deployment. See [`amplify.yml`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify.yml). |
 | **Custom Domain & SSL** | CNAME-based DNS routing with [AWS Certificate Manager (ACM)](https://aws.amazon.com/certificate-manager/) — fully automated HTTPS certificate provisioning and renewal. |
-| **Infrastructure as Code** | Backend defined via [AWS CDK](https://aws.amazon.com/cdk/) constructs in [`amplify/`](tennis-score-board/amplify/backend.ts:1) — auth, data models, and permissions are version-controlled and deployable. |
+| **Infrastructure as Code** | Backend defined via [AWS CDK](https://aws.amazon.com/cdk/) and orchestrated through [AWS CloudFormation](https://aws.amazon.com/cloudformation/) in [`amplify/`](https://github.com/Ru-Dipity/Tennis-Score-Board/tree/main/amplify) — auth, data models, and permissions are version-controlled and deployable. |
 | **GraphQL API** | Real-time data layer via [AWS AppSync](https://aws.amazon.com/appsync/) with subscription support for live score updates. |
+| **Managed NoSQL Database** | All tournament data persisted in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) — serverless, auto-scaling, single-digit-millisecond latency. |
 
 ---
 
@@ -96,8 +102,10 @@ flowchart LR
 | [AWS Amplify](https://aws.amazon.com/amplify/) | Hosting, CI/CD pipeline, backend deployment |
 | [Amazon CloudFront](https://aws.amazon.com/cloudfront/) | Global content delivery network (CDN) |
 | [AWS AppSync](https://aws.amazon.com/appsync/) | Managed GraphQL API with real-time subscriptions |
+| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Serverless NoSQL database — auto-scaling, millisecond latency |
 | [Amazon Cognito](https://aws.amazon.com/cognito/) | Authentication, user pools, admin group management |
 | [AWS Certificate Manager](https://aws.amazon.com/certificate-manager/) | Automated TLS/SSL certificate provisioning |
+| [AWS CloudFormation](https://aws.amazon.com/cloudformation/) | Infrastructure as Code orchestration (via AWS CDK) |
 | [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as Code for backend resources |
 
 ### Frontend
@@ -114,9 +122,9 @@ flowchart LR
 
 | File | Responsibility |
 |---|---|
-| [`amplify/data/resource.ts`](tennis-score-board/amplify/data/resource.ts:1) | GraphQL schema — models (Player, Team, Tournament, Match, TournamentEntry), enums, authorization rules |
-| [`amplify/auth/resource.ts`](tennis-score-board/amplify/auth/resource.ts:1) | Cognito user pool configuration — email sign-in, admin group |
-| [`amplify/backend.ts`](tennis-score-board/amplify/backend.ts:1) | Backend composition — wires auth + data resources |
+| [`amplify/data/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/data/resource.ts) | GraphQL schema — models (Player, Team, Tournament, Match, TournamentEntry), enums, authorization rules |
+| [`amplify/auth/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/auth/resource.ts) | Cognito user pool configuration — email sign-in, admin group |
+| [`amplify/backend.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/backend.ts) | Backend composition — wires auth + data resources |
 
 ---
 
@@ -130,8 +138,8 @@ flowchart LR
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-org/tennis-score-board.git
-cd tennis-score-board
+git clone https://github.com/Ru-Dipity/Tennis-Score-Board.git
+cd Tennis-Score-Board
 
 # 2. Install dependencies
 npm install
@@ -159,11 +167,11 @@ The app will be available at **http://localhost:5173** with hot module replaceme
 
 1. Navigate to **AWS Amplify Console** → **Host web app**.
 2. Select **GitHub** as the source provider and authorize access.
-3. Choose the `tennis-score-board` repository and `main` branch.
+3. Choose the `Tennis-Score-Board` repository and `main` branch.
 
 ### 2. Configure Build Settings
 
-Amplify automatically detects [`amplify.yml`](tennis-score-board/amplify.yml:1). The pipeline executes:
+Amplify automatically detects [`amplify.yml`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify.yml). The pipeline executes:
 
 ```
 Backend:  npm install → npx ampx pipeline-deploy
@@ -196,7 +204,7 @@ Artifacts: dist/
 ## 📁 Project Structure
 
 ```
-tennis-score-board/
+Tennis-Score-Board/
 ├── amplify/                    # Backend (Amplify Gen 2 / AWS CDK)
 │   ├── auth/
 │   │   └── resource.ts         # Cognito user pool config
@@ -254,7 +262,7 @@ frontend:
 
 **Pipeline Flow:**
 1. **Trigger**: Push to `main` branch.
-2. **Backend Phase**: Installs dependencies, deploys CDK stacks (Cognito, AppSync, DynamoDB).
+2. **Backend Phase**: Installs dependencies, synthesizes CDK app into CloudFormation templates, deploys stacks (Cognito, AppSync, DynamoDB tables).
 3. **Frontend Phase**: Installs dependencies, runs `tsc` type-check, bundles with Vite.
 4. **Artifact**: Outputs `dist/` to Amplify hosting.
 5. **Serving**: Amplify uploads to S3 → invalidates CloudFront cache → global rollout.
@@ -268,13 +276,13 @@ frontend:
 | **Public (Visitor)** | API Key | Read-only: view tournaments, matches, standings |
 | **Admin** | Cognito User Pools (`admin` group) | Full CRUD: players, teams, tournaments, matches |
 
-All GraphQL mutations are protected by schema-level authorization rules defined in [`amplify/data/resource.ts`](tennis-score-board/amplify/data/resource.ts:1).
+All GraphQL mutations are protected by schema-level authorization rules defined in [`amplify/data/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/data/resource.ts).
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the **MIT License**. See the [LICENSE](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/LICENSE) file for details.
 
 ---
 
