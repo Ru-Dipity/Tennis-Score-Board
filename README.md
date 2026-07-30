@@ -29,13 +29,13 @@ flowchart LR
     C --> D["📦 Backend Deploy<br/><code>npx ampx pipeline-deploy</code>"]
     C --> E["🎨 Frontend Build<br/><code>npm run build</code>"]
 
-    D --> F["📋 AWS CloudFormation<br/>(IaC Orchestration)"]
+    D --> F["📋 AWS CloudFormation<br/>IaC Orchestration"]
     F --> G["🛢️ AWS AppSync<br/>GraphQL API"]
     F --> H["🔐 Amazon Cognito<br/>User Pools"]
-    F --> I["🗄️ Amazon DynamoDB<br/>(Managed NoSQL)"]
+    F --> I["🗄️ Amazon DynamoDB<br/>Managed NoSQL"]
 
     E --> J["☁️ Amazon CloudFront CDN"]
-    J --> K["🌐 Custom DNS<br/>(CNAME + ACM SSL)"]
+    J --> K["🌐 Custom DNS<br/>CNAME + ACM SSL"]
     K --> L["🖥️ User Browser"]
 
     G -.->|Runtime<br/>Data Access| I
@@ -58,8 +58,7 @@ flowchart LR
 
 **Legend:**
 - `-->` **Solid arrow** = Deployment / provisioning flow
-- `-.->
-` **Dashed arrow** = Runtime data flow
+- `-.->` **Dashed arrow** = Runtime data flow
 
 ---
 
@@ -82,22 +81,43 @@ flowchart LR
 ### 🏆 Tournament Modes
 - **Knockout (Single Elimination)** — Automatic bracket generation with seeded draws, bye handling, and winner propagation.
 - **Round Robin** — Group-stage standings with configurable group count and qualification slots per group.
-- **Team Battle** — Responsive team-vs-team match panels with mobile/tablet-optimized CSS Flex/Grid layouts.
+- **Team Battle** — Responsive team-vs-team match panels with lineup editor and mobile/tablet-optimized CSS Flex/Grid layouts.
 
 ### 🎲 Match Management
 - **Singles & Doubles** support with player and team registration.
 - **Random Draw / Shuffle** — Random seeding for fair tournament starts.
 - **Multiple Match Formats** — Single set, Best of 3, Best of 5.
 - **Real-Time Score Entry** — Admin console with instant GraphQL subscription updates to visitor displays.
+- **Score Clearing** — Reset match scores with a single click for re-scoring.
+
+### 📅 Date-Based Tournament Schedule & Archive
+- **Event Date Picker** — Assign a specific date to each tournament for organized scheduling.
+- **Date-Filtered View** — Filter the tournament management panel by selected date to focus on today's or any specific day's events.
+- **Archive System** — Archive completed tournaments to declutter the active management view; archived items are collapsible and still accessible for review, sharing, or deletion.
+- **Archived Tournament Exclusion** — Archived tournaments and their matches are excluded from the "Record Match Score" dropdown to prevent accidental score changes.
+
+### 🔗 Shareable Spectator Links
+- **One-Click Share** — Generate a shareable link (`?tournamentId=xxx`) for any tournament with a single click.
+- **Clipboard Copy** — Cross-environment clipboard API with automatic fallback (`document.execCommand('copy')`) for non-HTTPS local development.
+- **Spectator Mode** — Visitors opening a shared link see a dedicated read-only view with hero stats (match count, player count) scoped to that specific tournament.
+- **Admin Login on Spectator Page** — Spectator pages include an "Admin Login" button so owners can sign in directly from the shared view.
+
+### 🔐 Authentication & Authorization
+- **Public Read-Only (API Key)** — Visitors can view live tournaments without authentication via shareable links.
+- **Owner Console (Cognito User Pools)** — Email-based sign-in with full CRUD on own records.
+- **Account Registration** — Self-service sign-up with email verification and confirmation code flow.
+- **Confirm Password Validation** — Client-side password match check before registration submission.
+- **Auto Sign-In Fallback** — After email confirmation, attempts `autoSignIn()` with graceful fallback to regular `signIn()` if the auto-sign-in flow has expired.
+- **Auth Modal** — Unified modal popup for sign-in and sign-up, with mode switching between the two forms.
+- **URL Cleanup on Login** — Automatic removal of `?tournamentId=xxx` query parameters after sign-in to prevent spectator-mode confusion for authenticated owners.
+- **Multi-Tenant Isolation** — Owner-based authorization (`allow.owner()`) ensures each authenticated user sees and manages only their own data.
 
 ### 📊 Live Display
 - **Bracket View** — Visual knockout bracket with round labels and match progression.
 - **Standings Tables** — Round-robin group rankings with points, games won/lost, and tie-break logic.
+- **Team Battle Panels** — Team summary cards and duel-by-duel match results.
 - **Responsive Design** — Dedicated mobile/tablet layouts using CSS Grid and Flexbox compression.
-
-### 🔐 Authentication & Authorization
-- **Public Read-Only** — Visitors can view live tournaments without authentication.
-- **Admin Console** — Email-based sign-in via Amazon Cognito with `admin` group write access for creating players, teams, tournaments, and entering scores.
+- **Context-Aware Hero Stats** — The hero banner dynamically shows stats relevant to the current view: spectator stats for shared links, owner stats for authenticated users, or a welcome message for bare visitors.
 
 ---
 
@@ -111,7 +131,7 @@ flowchart LR
 | [Amazon CloudFront](https://aws.amazon.com/cloudfront/) | Global content delivery network (CDN) |
 | [AWS AppSync](https://aws.amazon.com/appsync/) | Managed GraphQL API with real-time subscriptions |
 | [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Serverless NoSQL database — auto-scaling, millisecond latency |
-| [Amazon Cognito](https://aws.amazon.com/cognito/) | Authentication, user pools, admin group management |
+| [Amazon Cognito](https://aws.amazon.com/cognito/) | Authentication, user pools, owner-based authorization |
 | [AWS Certificate Manager](https://aws.amazon.com/certificate-manager/) | Automated TLS/SSL certificate provisioning |
 | [AWS CloudFormation](https://aws.amazon.com/cloudformation/) | Infrastructure as Code orchestration (via AWS CDK) |
 | [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as Code for backend resources |
@@ -130,8 +150,8 @@ flowchart LR
 
 | File | Responsibility |
 |---|---|
-| [`amplify/data/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/data/resource.ts) | GraphQL schema — models (Player, Team, Tournament, Match, TournamentEntry), enums, authorization rules |
-| [`amplify/auth/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/auth/resource.ts) | Cognito user pool configuration — email sign-in, admin group |
+| [`amplify/data/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/data/resource.ts) | GraphQL schema — models (Player, Team, Tournament, Match, TournamentEntry), enums, owner-based authorization rules |
+| [`amplify/auth/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/auth/resource.ts) | Cognito user pool configuration — email sign-in, owner-based multi-tenant auth |
 | [`amplify/backend.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/backend.ts) | Backend composition — wires auth + data resources |
 
 ---
@@ -281,10 +301,12 @@ frontend:
 
 | Access Level | Auth Provider | Operations |
 |---|---|---|
-| **Public (Visitor)** | API Key | Read-only: view tournaments, matches, standings |
-| **Admin** | Cognito User Pools (`admin` group) | Full CRUD: players, teams, tournaments, matches |
+| **Public (Visitor / Share Link)** | API Key | Read-only: view tournaments, matches, standings |
+| **Authenticated Owner** | Cognito User Pools (`owner` field) | Full CRUD on own records: players, teams, tournaments, matches |
 
-All GraphQL mutations are protected by schema-level authorization rules defined in [`amplify/data/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/data/resource.ts).
+The schema uses **multi-tenant owner-based authorization** — each authenticated user (owner) has full CRUD access only to their own data, enforced by the [`allow.owner()`](https://docs.amplify.aws/react/build-a-backend/data/authorization/) directive on every model. Public read access is granted via [`allow.publicApiKey().to(['read'])`](https://docs.amplify.aws/react/build-a-backend/data/authorization/) for shareable spectator links.
+
+All authorization rules are defined in [`amplify/data/resource.ts`](https://github.com/Ru-Dipity/Tennis-Score-Board/blob/main/amplify/data/resource.ts).
 
 ---
 

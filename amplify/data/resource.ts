@@ -28,7 +28,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
-      allow.groups(['admin']),
+      allow.owner(),
     ]),
 
   Team: a
@@ -42,7 +42,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
-      allow.groups(['admin']),
+      allow.owner(),
     ]),
 
   Tournament: a
@@ -59,6 +59,8 @@ const schema = a.schema({
       teamCount: a.integer(),
       teamSize: a.integer(),
       teamLabels: a.string().array(),
+      eventDate: a.string().required(),
+      isArchived: a.boolean().default(false),
       startedAt: a.string(),
       completedAt: a.string(),
       entries: a.hasMany('TournamentEntry', 'tournamentId'),
@@ -66,7 +68,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
-      allow.groups(['admin']),
+      allow.owner(),
     ]),
 
   TournamentEntry: a
@@ -90,7 +92,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
-      allow.groups(['admin']),
+      allow.owner(),
     ]),
 
   Match: a
@@ -130,7 +132,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
-      allow.groups(['admin']),
+      allow.owner(),
     ]),
 });
 

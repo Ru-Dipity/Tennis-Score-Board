@@ -1,12 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useMemo, useState } from 'react';
-import { Authenticator } from '@aws-amplify/ui-react';
 import {
   fetchAuthSession,
   getCurrentUser,
   signIn,
   signOut,
+  signUp,
+  confirmSignUp,
+  autoSignIn,
 } from 'aws-amplify/auth';
+import { Hub } from 'aws-amplify/utils';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '../amplify/data/resource';
 import './App.css';
@@ -38,10 +41,8 @@ type TournamentEntry = any;
 type Match = any;
 type Gender = 'MALE' | 'FEMALE' | 'MIXED' | 'UNSPECIFIED';
 
-const ADMIN_GROUP = 'admin';
-
-function authModeForAdmin(isAdmin: boolean) {
-  return isAdmin ? ({ authMode: 'userPool' as const }) : undefined;
+function ownerAuthMode() {
+  return { authMode: 'userPool' as const };
 }
 
 function isAmplifyListItem<T>(value: T | null | undefined): value is T {
@@ -181,10 +182,27 @@ function App() {
   const [matches, setMatches] = useState<Match[]>([]);
 
   const [authChecked, setAuthChecked] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [authView, setAuthView] = useState<'visitor' | 'admin'>('visitor');
-  const [adminLogin, setAdminLogin] = useState({ email: '', password: '' });
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authView, setAuthView] = useState<'visitor' | 'owner'>('visitor');
+  const [ownerLogin, setOwnerLogin] = useState({ email: '', password: '' });
   const [authError, setAuthError] = useState('');
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [isSignUpMode, setIsSignUpMode] = useState(false);
+  const [signUpForm, setSignUpForm] = useState({ email: '', password: '', confirmPassword: '', confirmationCode: '' });
+  const [signUpStep, setSignUpStep] = useState<'form' | 'confirm'>('form');
+  const [urlCleared, setUrlCleared] = useState(false);
+
+  // URL query parameter parsing for spectator sharing
+  // urlCleared state allows clearing params after login without page reload
+  const urlParams = useMemo(() => new URLSearchParams(window.location.search), [urlCleared]);
+  const sharedTournamentId = urlCleared ? null : urlParams.get('tournamentId');
+  const sharedDate = urlParams.get('date');
+  const sharedOwner = urlParams.get('owner');
+
+  // Date picker state for owner tournament management
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+  const [showArchived, setShowArchived] = useState(false);
 
   const [playerForm, setPlayerForm] = useState({
     name: '',
@@ -207,6 +225,7 @@ function App() {
     teamCount: 2,
     teamSize: 4,
     teamLabels: ['Team A', 'Team B'],
+    eventDate: todayStr,
   });
   const [matchForm, setMatchForm] = useState({
     matchId: '',
@@ -216,23 +235,27 @@ function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Subscribe to data based on authentication state.
+  // - Authenticated: use 'userPool' mode → only sees own records (multi-tenant isolation)
+  // - Unauthenticated: use 'apiKey' mode → sees all public records (read-only)
   useEffect(() => {
+    const authMode = isAuthenticated ? 'userPool' : 'apiKey';
     const subscriptions = [
-      client.models.Player.observeQuery({ authMode: 'apiKey' }).subscribe({
+      client.models.Player.observeQuery({ authMode }).subscribe({
         next: ({ items }) => setPlayers(items.filter(isAmplifyListItem)),
       }),
-      client.models.Team.observeQuery({ authMode: 'apiKey' }).subscribe({
+      client.models.Team.observeQuery({ authMode }).subscribe({
         next: ({ items }) => setTeams(items.filter(isAmplifyListItem)),
       }),
-      client.models.Tournament.observeQuery({ authMode: 'apiKey' }).subscribe({
+      client.models.Tournament.observeQuery({ authMode }).subscribe({
         next: ({ items }) => setTournaments(items.filter(isAmplifyListItem)),
       }),
       client.models.TournamentEntry
-        .observeQuery({ authMode: 'apiKey' })
+        .observeQuery({ authMode })
         .subscribe({
           next: ({ items }) => setEntries(items.filter(isAmplifyListItem)),
         }),
-      client.models.Match.observeQuery({ authMode: 'apiKey' }).subscribe({
+      client.models.Match.observeQuery({ authMode }).subscribe({
         next: ({ items }) => setMatches(items.filter(isAmplifyListItem)),
       }),
     ];
@@ -240,10 +263,23 @@ function App() {
     return () => {
       subscriptions.forEach((subscription) => subscription.unsubscribe());
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
-    void checkAdminSession();
+    void checkAuthSession();
+  }, []);
+
+  // Listen for auth events (sign-up, sign-in, token refresh) to update state without refresh
+  useEffect(() => {
+    const listener = Hub.listen('auth', ({ payload }) => {
+      switch (payload.event) {
+        case 'signedIn':
+        case 'tokenRefresh':
+          void checkAuthSession();
+          break;
+      }
+    });
+    return () => listener();
   }, []);
 
   const playerMap = useMemo(
@@ -313,11 +349,130 @@ function App() {
     tournamentForm.teamSize,
   ]);
 
+  // Active tournaments: non-archived, non-DRAFT, filtered by selected date (owner view)
+  // In spectator mode with sharedTournamentId, only show the specific shared tournament
   const activeTournaments = useMemo(
     () =>
       [...tournaments]
-        .filter((item) => item.status !== 'DRAFT')
+        .filter((item) => {
+          if (item.status === 'DRAFT') return false;
+          if (sharedTournamentId) return item.id === sharedTournamentId;
+          return !item.isArchived && item.eventDate === selectedDate;
+        })
         .sort((left, right) => left.name.localeCompare(right.name, 'en')),
+    [tournaments, selectedDate, sharedTournamentId],
+  );
+
+  // Hero stats: context-aware computations
+  // Spectator mode: only count data belonging to the shared tournament
+  const spectatorMatchCount = useMemo(
+    () => (sharedTournamentId ? matches.filter((m) => m.tournamentId === sharedTournamentId).length : 0),
+    [matches, sharedTournamentId],
+  );
+  const spectatorPlayerCount = useMemo(() => {
+    if (!sharedTournamentId) return 0;
+    const sharedEntryIds = new Set(
+      entries.filter((e) => e.tournamentId === sharedTournamentId).map((e) => e.id),
+    );
+    // Count unique players referenced in matches of this tournament
+    const playerIds = new Set<string>();
+    matches
+      .filter((m) => m.tournamentId === sharedTournamentId)
+      .forEach((m) => {
+        if (m.participantAEntryId && sharedEntryIds.has(m.participantAEntryId)) {
+          const entry = entries.find((e) => e.id === m.participantAEntryId);
+          if (entry?.playerId) playerIds.add(entry.playerId);
+        }
+        if (m.participantBEntryId && sharedEntryIds.has(m.participantBEntryId)) {
+          const entry = entries.find((e) => e.id === m.participantBEntryId);
+          if (entry?.playerId) playerIds.add(entry.playerId);
+        }
+      });
+    return playerIds.size;
+  }, [entries, matches, sharedTournamentId]);
+  // Owner mode: only count non-archived tournament data
+  const ownerActiveTournamentIds = useMemo(
+    () => new Set(tournaments.filter((t) => !t.isArchived && t.status !== 'DRAFT').map((t) => t.id)),
+    [tournaments],
+  );
+  const ownerMatchCount = useMemo(
+    () => matches.filter((m) => ownerActiveTournamentIds.has(m.tournamentId)).length,
+    [matches, ownerActiveTournamentIds],
+  );
+  const ownerPlayerCount = useMemo(
+    () => players.filter((p) => p.isActive !== false).length,
+    [players],
+  );
+
+  // When a spectator visits via sharedTournamentId, fetch the specific tournament data directly.
+  // This ensures the tournament loads even if observeQuery with apiKey doesn't return it.
+  useEffect(() => {
+    if (!sharedTournamentId) return;
+    let cancelled = false;
+    async function fetchSharedTournament() {
+      try {
+        const tournamentResult = await client.models.Tournament.get(
+          { id: sharedTournamentId } as any,
+          { authMode: 'apiKey' },
+        );
+        if (cancelled) return;
+        if (tournamentResult.data) {
+          setTournaments((current) =>
+            upsertLocalItem(current, tournamentResult.data as Tournament),
+          );
+        }
+        // Fetch all entries and matches with apiKey, then filter client-side
+        const [allEntries, allMatches] = await Promise.all([
+          client.models.TournamentEntry.list({ authMode: 'apiKey' }),
+          client.models.Match.list({ authMode: 'apiKey' }),
+        ]);
+        if (cancelled) return;
+        if (allEntries.data) {
+          const filteredEntries = allEntries.data
+            .filter(isAmplifyListItem)
+            .filter((entry) => entry.tournamentId === sharedTournamentId);
+          setEntries((current) => {
+            const next = [...current];
+            filteredEntries.forEach((entry) => {
+              const idx = next.findIndex((e) => e.id === entry.id);
+              if (idx === -1) next.push(entry as TournamentEntry);
+              else next[idx] = entry as TournamentEntry;
+            });
+            return next;
+          });
+        }
+        if (allMatches.data) {
+          const filteredMatches = allMatches.data
+            .filter(isAmplifyListItem)
+            .filter((match) => match.tournamentId === sharedTournamentId);
+          setMatches((current) => {
+            const next = [...current];
+            filteredMatches.forEach((match) => {
+              const idx = next.findIndex((m) => m.id === match.id);
+              if (idx === -1) next.push(match as Match);
+              else next[idx] = match as Match;
+            });
+            return next;
+          });
+        }
+      } catch {
+        // Silently fail — observeQuery may still deliver the data
+      }
+    }
+    void fetchSharedTournament();
+    return () => { cancelled = true; };
+  }, [sharedTournamentId]);
+
+  // Archived tournaments for the owner's archived panel
+  const archivedTournaments = useMemo(
+    () =>
+      [...tournaments]
+        .filter((item) => item.isArchived)
+        .sort((left, right) => {
+          const dateCmp = (right.eventDate ?? '').localeCompare(left.eventDate ?? '');
+          if (dateCmp !== 0) return dateCmp;
+          return left.name.localeCompare(right.name, 'en');
+        }),
     [tournaments],
   );
 
@@ -354,9 +509,11 @@ function App() {
 
   const manageableTournaments = useMemo(
     () =>
-      [...tournaments].sort((left, right) =>
-        left.name.localeCompare(right.name, 'en'),
-      ),
+      [...tournaments]
+        .filter((item) => !item.isArchived)
+        .sort((left, right) =>
+          left.name.localeCompare(right.name, 'en'),
+        ),
     [tournaments],
   );
 
@@ -388,9 +545,14 @@ function App() {
   const adminScorableMatches = useMemo(
     () =>
       [...matches]
-        .filter((match) => match.participantAName && match.participantBName)
+        .filter((match) => {
+          if (!match.participantAName || !match.participantBName) return false;
+          // Exclude matches belonging to archived tournaments
+          const parentTournament = tournaments.find((t) => t.id === match.tournamentId);
+          return !parentTournament?.isArchived;
+        })
         .sort((left, right) => left.displayOrder - right.displayOrder),
-    [matches],
+    [matches, tournaments],
   );
 
   function upsertLocalItem<T extends { id: string }>(items: T[], item: T) {
@@ -408,32 +570,81 @@ function App() {
     return items.filter((item) => item.id !== id);
   }
 
-  async function checkAdminSession() {
+  function copyToClipboard(text: string): Promise<void> {
+    // Always try the modern Clipboard API first with a catch fallback.
+    // On localhost, isSecureContext is true but clipboard.writeText may still fail
+    // due to permissions. The fallback handles that case.
+    if (navigator.clipboard) {
+      return navigator.clipboard.writeText(text).catch(() => {
+        // Fallback for environments where clipboard API fails (permissions, etc.)
+        return fallbackCopy(text);
+      });
+    }
+    // Fallback for environments without clipboard API
+    return fallbackCopy(text);
+  }
+
+  function fallbackCopy(text: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        resolve();
+      } catch {
+        reject(new Error('Clipboard API not available'));
+      }
+    });
+  }
+
+  /** Clear tournamentId from URL and reset sharedTournamentId state */
+  function clearUrlParams() {
+    if (window.location.search.includes('tournamentId')) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      setUrlCleared(true);
+    }
+  }
+
+  async function checkAuthSession() {
     try {
       await getCurrentUser();
-      const session = await fetchAuthSession();
-      const groups =
-        (session.tokens?.idToken?.payload['cognito:groups'] as string[] | undefined) ??
-        [];
-      setIsAdmin(groups.includes(ADMIN_GROUP));
-      setAuthError(groups.includes(ADMIN_GROUP) ? '' : 'The current account is not in the admin group.');
+      setIsAuthenticated(true);
+      setAuthError('');
+      // If already authenticated on page load, clean up any stray URL params
+      clearUrlParams();
     } catch {
-      setIsAdmin(false);
+      setIsAuthenticated(false);
     } finally {
       setAuthChecked(true);
     }
   }
 
-  async function handleAdminSignIn(event: React.FormEvent<HTMLFormElement>) {
+  async function handleOwnerSignIn(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthError('');
     try {
       await signIn({
-        username: adminLogin.email.trim(),
-        password: adminLogin.password,
+        username: ownerLogin.email.trim(),
+        password: ownerLogin.password,
       });
-      await checkAdminSession();
-      setAdminLogin({ email: '', password: '' });
+      // Clear stale public data before switching to owner-scoped queries
+      setPlayers([]);
+      setTeams([]);
+      setTournaments([]);
+      setEntries([]);
+      setMatches([]);
+      setIsAuthenticated(true);
+      setOwnerLogin({ email: '', password: '' });
+      // Close modal so user sees the Admin Console immediately
+      closeAuthModal();
+      // Clean up any spectator URL params to avoid mode confusion
+      clearUrlParams();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to sign in.';
       setAuthError(message);
@@ -442,8 +653,99 @@ function App() {
 
   async function handleSignOut() {
     await signOut();
-    setIsAdmin(false);
+    // Clear owner-scoped data before switching back to public queries
+    setPlayers([]);
+    setTeams([]);
+    setTournaments([]);
+    setEntries([]);
+    setMatches([]);
+    setIsAuthenticated(false);
     setAuthView('visitor');
+    setShowAuthModal(false);
+  }
+
+  async function handleSignUp(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAuthError('');
+    // Validate confirm password match
+    if (signUpForm.password !== signUpForm.confirmPassword) {
+      setAuthError('Passwords do not match. Please check and try again.');
+      return;
+    }
+    try {
+      await signUp({
+        username: signUpForm.email.trim(),
+        password: signUpForm.password,
+        options: {
+          userAttributes: {
+            email: signUpForm.email.trim(),
+          },
+        },
+      });
+      // Move to confirmation step
+      setSignUpStep('confirm');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to sign up.';
+      setAuthError(message);
+    }
+  }
+
+  async function handleConfirmSignUp(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAuthError('');
+    try {
+      await confirmSignUp({
+        username: signUpForm.email.trim(),
+        confirmationCode: signUpForm.confirmationCode,
+      });
+      // Attempt auto-sign-in; fall back to regular sign-in if the flow has expired
+      try {
+        await autoSignIn();
+      } catch (autoSignInError) {
+        console.log('autoSignIn 降级为常规 signIn:', autoSignInError);
+        // Fallback: use the credentials the user just submitted
+        await signIn({
+          username: signUpForm.email.trim(),
+          password: signUpForm.password,
+        });
+      }
+      // Clear stale public data before switching to owner-scoped queries
+      setPlayers([]);
+      setTeams([]);
+      setTournaments([]);
+      setEntries([]);
+      setMatches([]);
+      setIsAuthenticated(true);
+      setShowAuthModal(false);
+      setSignUpForm({ email: '', password: '', confirmPassword: '', confirmationCode: '' });
+      setSignUpStep('form');
+      setIsSignUpMode(false);
+      clearUrlParams();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Confirmation failed.';
+      setAuthError(message);
+    }
+  }
+
+  function openAuthModal() {
+    setAuthError('');
+    setOwnerLogin({ email: '', password: '' });
+    setSignUpForm({ email: '', password: '', confirmPassword: '', confirmationCode: '' });
+    setSignUpStep('form');
+    setIsSignUpMode(false);
+    setShowAuthModal(true);
+  }
+
+  function closeAuthModal() {
+    setShowAuthModal(false);
+    setAuthError('');
+  }
+
+  function switchAuthMode() {
+    setAuthError('');
+    setSignUpForm({ email: '', password: '', confirmPassword: '', confirmationCode: '' });
+    setSignUpStep('form');
+    setIsSignUpMode((prev) => !prev);
   }
 
   function updateTournamentMode(nextEventType: EventType) {
@@ -501,7 +803,7 @@ function App() {
 
   async function createPlayer(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -514,7 +816,7 @@ function App() {
           gender: playerForm.gender,
           isActive: true,
         } as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
       if (data) {
         setPlayers((current) => upsertLocalItem(current, data as Player));
@@ -528,7 +830,7 @@ function App() {
 
   async function createTeam(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -555,7 +857,7 @@ function App() {
           playerOneId: teamForm.playerOneId,
           playerTwoId: teamForm.playerTwoId,
         } as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
       if (data) {
         setTeams((current) => upsertLocalItem(current, data as Team));
@@ -569,7 +871,7 @@ function App() {
 
   async function createTournament(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -671,6 +973,7 @@ function App() {
         eventType: tournamentForm.eventType === 'TEAM' ? 'TEAM' : tournamentForm.eventType,
         status: 'LIVE',
         matchFormat: tournamentForm.matchFormat,
+        eventDate: tournamentForm.eventDate,
         groupCount: effectiveMode === 'ROUND_ROBIN' ? tournamentForm.groupCount : undefined,
         qualifyPerGroup:
           effectiveMode === 'ROUND_ROBIN' ? tournamentForm.qualifyPerGroup : undefined,
@@ -687,7 +990,7 @@ function App() {
 
       const { data: createdTournament } = await client.models.Tournament.create(
         tournamentPayload as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
 
       if (!createdTournament) {
@@ -714,7 +1017,7 @@ function App() {
 
         const { data: createdEntry } = await client.models.TournamentEntry.create(
           payload as any,
-          authModeForAdmin(true),
+          ownerAuthMode(),
         );
 
         if (createdEntry) {
@@ -765,7 +1068,7 @@ function App() {
 
         const { data: createdMatch } = await client.models.Match.create(
           payload as any,
-          authModeForAdmin(true),
+          ownerAuthMode(),
         );
         if (createdMatch) {
           setMatches((current) => upsertLocalItem(current, createdMatch as Match));
@@ -784,6 +1087,7 @@ function App() {
         teamCount: 2,
         teamSize: 4,
         teamLabels: ['Team A', 'Team B'],
+        eventDate: todayStr,
       });
       setStatusMessage(`Tournament "${createdTournament.name}" was created successfully.`);
     } catch (error) {
@@ -847,7 +1151,7 @@ function App() {
 
     const { data } = await client.models.Tournament.update(
       updatePayload,
-      authModeForAdmin(true),
+      ownerAuthMode(),
     );
 
     setTournaments((current) =>
@@ -907,7 +1211,7 @@ function App() {
       completedAt: null,
     };
 
-    const { data } = await client.models.Match.update(updatePayload as any, authModeForAdmin(true));
+    const { data } = await client.models.Match.update(updatePayload as any, ownerAuthMode());
     const nextLocalMatches = mergeMatchState(
       localMatches,
       nextMatch.id,
@@ -919,7 +1223,7 @@ function App() {
 
   async function recordMatch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!isAdmin || !selectedMatch) {
+    if (!isAuthenticated || !selectedMatch) {
       return;
     }
 
@@ -960,7 +1264,7 @@ function App() {
     try {
       const { data } = await client.models.Match.update(
         updatePayload as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
       let nextMatches = mergeMatchState(
         matches,
@@ -999,7 +1303,7 @@ function App() {
   }
 
   async function clearMatchScore() {
-    if (!isAdmin || !selectedMatch) {
+    if (!isAuthenticated || !selectedMatch) {
       return;
     }
 
@@ -1023,7 +1327,7 @@ function App() {
     try {
       const { data } = await client.models.Match.update(
         updatePayload as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
       let nextMatches = mergeMatchState(
         matches,
@@ -1054,7 +1358,7 @@ function App() {
   }
 
   async function deleteTournament(tournamentId: string) {
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -1069,19 +1373,19 @@ function App() {
       const tournamentEntries = entries.filter((entry) => entry.tournamentId === tournamentId);
 
       for (const match of tournamentMatches) {
-        await client.models.Match.delete({ id: match.id } as any, authModeForAdmin(true));
+        await client.models.Match.delete({ id: match.id } as any, ownerAuthMode());
       }
 
       for (const entry of tournamentEntries) {
         await client.models.TournamentEntry.delete(
           { id: entry.id } as any,
-          authModeForAdmin(true),
+          ownerAuthMode(),
         );
       }
 
       await client.models.Tournament.delete(
         { id: tournamentId } as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
       setMatches((current) =>
         current.filter((match) => match.tournamentId !== tournamentId),
@@ -1103,8 +1407,37 @@ function App() {
     }
   }
 
+  async function archiveTournament(tournamentId: string) {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      const { data } = await client.models.Tournament.update(
+        { id: tournamentId, isArchived: true } as any,
+        ownerAuthMode(),
+      );
+      if (data) {
+        setTournaments((current) =>
+          upsertLocalItem(current, {
+            ...(current.find((t) => t.id === tournamentId) ?? {}),
+            ...data,
+          } as Tournament),
+        );
+      }
+      setStatusMessage('Tournament archived successfully.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to archive tournament.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function deletePlayer(playerId: string) {
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -1123,7 +1456,7 @@ function App() {
             id: playerId,
             isActive: false,
           } as any,
-          authModeForAdmin(true),
+          ownerAuthMode(),
         );
         setPlayers((current) =>
           upsertLocalItem(
@@ -1161,7 +1494,7 @@ function App() {
     setSaving(true);
     setStatusMessage('');
     try {
-      await client.models.Player.delete({ id: playerId } as any, authModeForAdmin(true));
+      await client.models.Player.delete({ id: playerId } as any, ownerAuthMode());
       setPlayers((current) => removeLocalItem(current, playerId));
       setTeamForm((current) => ({
         ...current,
@@ -1182,7 +1515,7 @@ function App() {
   }
 
   async function deleteTeam(teamId: string) {
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -1213,7 +1546,7 @@ function App() {
     setSaving(true);
     setStatusMessage('');
     try {
-      await client.models.Team.delete({ id: teamId } as any, authModeForAdmin(true));
+      await client.models.Team.delete({ id: teamId } as any, ownerAuthMode());
       setTeams((current) => removeLocalItem(current, teamId));
       setStatusMessage(`Team "${team?.name ?? 'Unknown'}" deleted successfully.`);
     } catch (error) {
@@ -1259,7 +1592,7 @@ function App() {
     side: WinnerSide,
     nextEntryIds: string[],
   ) {
-    if (!isAdmin) {
+    if (!isAuthenticated) {
       return;
     }
 
@@ -1288,7 +1621,7 @@ function App() {
     try {
       const { data } = await client.models.Match.update(
         updatePayload as any,
-        authModeForAdmin(true),
+        ownerAuthMode(),
       );
       setMatches((current) =>
         mergeMatchState(current, match.id, updatePayload, data as Match | null),
@@ -1488,32 +1821,59 @@ function App() {
     await deletePlayer(participantId);
   }
 
+  // Determine if the page is in "bare visitor mode" (no URL params, no auth)
+  const isBareVisitor = !sharedTournamentId && !sharedDate && !sharedOwner && !isAuthenticated;
+
   return (
     <div className="app-shell">
       <header className="hero-banner">
         <div className="hero-left">
           <span className="hero-tag">🎾 LIVE SCOREBOARD & TOURNAMENT CENTER</span>
           <h1>Tennis Score Board</h1>
-          <p className="hero-copy">
-            Real-time scores, interactive brackets, and team battle controls — simplified for players and admins.
-          </p>
+          {isBareVisitor ? (
+            <p className="hero-copy welcome-mode">
+              Welcome to the Tennis Real-Time Scoring System. Please use the link provided by the
+              tournament organizer to view schedules and live scores.
+            </p>
+          ) : sharedTournamentId ? (
+            <p className="hero-copy spectator-mode">
+              👁️ Spectator Mode — Viewing a shared tournament. Data updates in real time.
+            </p>
+          ) : (
+            <p className="hero-copy">
+              Real-time scores, interactive brackets, and team battle controls — simplified for players and owners.
+            </p>
+          )}
           <div className="hero-actions">
-            <button
-              className="hero-btn hero-btn-primary"
-              type="button"
-              onClick={() => document.getElementById('live-tournament-display')?.scrollIntoView({ behavior: 'smooth' })}
-            >
-              🏆 View Live Draws
-            </button>
-            <button
-              className="hero-btn hero-btn-secondary"
-              type="button"
-              onClick={() => document.getElementById('admin-management')?.scrollIntoView({ behavior: 'smooth' })}
-            >
-              ⚡ Admin Control
-            </button>
+            {!isBareVisitor && (
+              <button
+                className="hero-btn hero-btn-primary"
+                type="button"
+                onClick={() => document.getElementById('live-tournament-display')?.scrollIntoView({ behavior: 'smooth' })}
+              >
+                🏆 View Live Draws
+              </button>
+            )}
+            {!isAuthenticated ? (
+              <button
+                className="hero-btn hero-btn-secondary"
+                type="button"
+                onClick={openAuthModal}
+              >
+                🔑 Admin Login / Register
+              </button>
+            ) : (
+              <button
+                className="hero-btn hero-btn-secondary"
+                type="button"
+                onClick={() => document.getElementById('admin-management')?.scrollIntoView({ behavior: 'smooth' })}
+              >
+                ⚡ Admin Control
+              </button>
+            )}
           </div>
         </div>
+        {!isBareVisitor && (
         <div className="hero-live-widget">
           <div className="live-widget-header">
             <span className="live-dot"></span>
@@ -1522,17 +1882,25 @@ function App() {
           <div className="live-widget-stats">
             <div className="live-stat-item">
               <span className="live-stat-label">Active tournaments</span>
-              <strong className="live-stat-value">{activeTournaments.length}</strong>
+              <strong className="live-stat-value">
+                {sharedTournamentId
+                  ? (activeTournaments.length > 0 ? 1 : 0)
+                  : activeTournaments.length}
+              </strong>
             </div>
             <div className="live-stat-divider"></div>
             <div className="live-stat-item">
               <span className="live-stat-label">Players</span>
-              <strong className="live-stat-value">{players.filter((p) => p.isActive !== false).length}</strong>
+              <strong className="live-stat-value">
+                {sharedTournamentId ? spectatorPlayerCount : ownerPlayerCount}
+              </strong>
             </div>
             <div className="live-stat-divider"></div>
             <div className="live-stat-item">
               <span className="live-stat-label">Matches</span>
-              <strong className="live-stat-value">{matches.length}</strong>
+              <strong className="live-stat-value">
+                {sharedTournamentId ? spectatorMatchCount : ownerMatchCount}
+              </strong>
             </div>
           </div>
           <div className="live-widget-footer">
@@ -1540,8 +1908,10 @@ function App() {
             <span>Auto-sync via Amplify</span>
           </div>
         </div>
+        )}
       </header>
 
+      {!isBareVisitor && (
       <section className="section-card" id="live-tournament-display">
         <div className="section-heading">
           <div>
@@ -1552,8 +1922,9 @@ function App() {
 
         {tournamentCards.length === 0 ? (
           <div className="empty-state">
-            No live tournament is available yet. Once an admin creates one, the public board will
-            update automatically.
+            {sharedTournamentId
+              ? 'The shared tournament could not be found or has no data available.'
+              : 'No live tournament is available yet. Once an owner creates one, the public board will update automatically.'}
           </div>
         ) : (
           <div className="tournament-grid">
@@ -1724,104 +2095,39 @@ function App() {
           </div>
         )}
       </section>
+      )}
 
-      <section className="section-card" id="admin-management">
-        <div className="section-heading">
-          <div>
-            <p className="section-tag">Admin Console</p>
-            <h2>Admin Management</h2>
-          </div>
-          <p className="section-desc">
-            The admin console supports seeded manual selection, random draw, multi-set score entry,
-            knockout propagation, and team battle scheduling.
-          </p>
-        </div>
-
-        {!authChecked ? (
-          <div className="empty-state">Checking admin session...</div>
-        ) : !isAdmin ? (
-          <div className="admin-auth-layout">
-            <div className="auth-switch">
-              <button
-                className={authView === 'visitor' ? 'active' : ''}
-                onClick={() => setAuthView('visitor')}
-                type="button"
-              >
-                Read-only mode
-              </button>
-              <button
-                className={authView === 'admin' ? 'active' : ''}
-                onClick={() => setAuthView('admin')}
-                type="button"
-              >
-                Admin sign in
-              </button>
+      {/* Admin Management — full dashboard for authenticated owners only */}
+      {authChecked && isAuthenticated && (
+        <section className="section-card" id="admin-management">
+          <div className="section-heading">
+            <div>
+              <p className="section-tag">Admin Console</p>
+              <h2>Admin Management</h2>
             </div>
-
-            {authView === 'visitor' ? (
-              <div className="empty-state">
-                The public board stays accessible without sign-in. Use an account inside the
-                Cognito <code>admin</code> group to unlock management features.
-              </div>
-            ) : (
-              <div className="admin-login-grid">
-                <form className="panel-form" onSubmit={handleAdminSignIn}>
-                  <h3>Admin Sign In</h3>
-                  <label>
-                    Email
-                    <input
-                      type="email"
-                      value={adminLogin.email}
-                      onChange={(event) =>
-                        setAdminLogin((current) => ({
-                          ...current,
-                          email: event.target.value,
-                        }))
-                      }
-                      required
-                    />
-                  </label>
-                  <label>
-                    Password
-                    <input
-                      type="password"
-                      value={adminLogin.password}
-                      onChange={(event) =>
-                        setAdminLogin((current) => ({
-                          ...current,
-                          password: event.target.value,
-                        }))
-                      }
-                      required
-                    />
-                  </label>
-                  <button className="primary-button" type="submit">
-                    Sign in
-                  </button>
-                  {authError ? <p className="error-text">{authError}</p> : null}
-                </form>
-
-                <div className="panel-info">
-                  <h3>Admin setup notes</h3>
-                  <ul>
-                    <li>Create the admin account in Amplify Auth / Cognito.</li>
-                    <li>Add that account into the <code>admin</code> user group.</li>
-                    <li>After sign-in, write access becomes available automatically.</li>
-                  </ul>
-                  <div className="authenticator-preview">
-                    <Authenticator />
-                  </div>
-                </div>
-              </div>
-            )}
+            <p className="section-desc">
+              The owner console supports seeded manual selection, random draw, multi-set score entry,
+              knockout propagation, and team battle scheduling.
+            </p>
           </div>
-        ) : (
+
           <div className="admin-console">
             <div className="admin-topbar">
-              <p>Signed in as admin.</p>
-              <button className="secondary-button" onClick={handleSignOut} type="button">
-                Sign out
-              </button>
+              <p>Signed in as owner.</p>
+              <div className="admin-topbar-right">
+                <label className="date-picker-label">
+                  <span>Event date:</span>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(event) => setSelectedDate(event.target.value)}
+                    className="date-picker-input"
+                  />
+                </label>
+                <button className="secondary-button" onClick={handleSignOut} type="button">
+                  Sign out
+                </button>
+              </div>
             </div>
 
             {statusMessage ? <div className="status-banner">{statusMessage}</div> : null}
@@ -1956,6 +2262,20 @@ function App() {
                       <option value="BEST_OF_3">Best of 3</option>
                       <option value="BEST_OF_5">Best of 5</option>
                     </select>
+                  </label>
+                  <label>
+                    Event date
+                    <input
+                      type="date"
+                      value={tournamentForm.eventDate}
+                      onChange={(event) =>
+                        setTournamentForm((current) => ({
+                          ...current,
+                          eventDate: event.target.value,
+                        }))
+                      }
+                      required
+                    />
                   </label>
 
                   {tournamentForm.eventType !== 'TEAM' ? (
@@ -2288,7 +2608,7 @@ function App() {
                 <h3>Tournament Management</h3>
                 <div className="admin-list">
                   {manageableTournaments.length === 0 ? (
-                    <p>No tournaments created yet.</p>
+                    <p>No tournaments for this date.</p>
                   ) : (
                     manageableTournaments.map((tournament) => (
                       <div className="admin-list-item" key={tournament.id}>
@@ -2296,20 +2616,104 @@ function App() {
                           <strong>{tournament.name}</strong>
                           <p>
                             {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
-                            {getMatchFormatLabel(tournament.matchFormat)}
+                            {getMatchFormatLabel(tournament.matchFormat)} ·{' '}
+                            <span className="event-date-badge">{tournament.eventDate ?? 'No date'}</span>
                           </p>
                         </div>
-                        <button
-                          className="danger-button"
-                          onClick={() => void deleteTournament(tournament.id)}
-                          type="button"
-                        >
-                          Delete
-                        </button>
+                        <div className="admin-list-actions">
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() => {
+                              const url = `${window.location.origin}${window.location.pathname}?tournamentId=${tournament.id}`;
+                              copyToClipboard(url).then(() => {
+                                setStatusMessage('🔗 Share link copied to clipboard!');
+                              }).catch(() => {
+                                setStatusMessage('Failed to copy link. Please copy the URL manually.');
+                              });
+                            }}
+                            title="Copy spectator share link"
+                          >
+                            🔗 Share
+                          </button>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() => void archiveTournament(tournament.id)}
+                            disabled={saving}
+                            title="Archive this tournament"
+                          >
+                            📦 Archive
+                          </button>
+                          <button
+                            className="danger-button"
+                            onClick={() => void deleteTournament(tournament.id)}
+                            type="button"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                     ))
                   )}
                 </div>
+              </div>
+
+              {/* Archived Tournaments Panel */}
+              <div className="panel-form">
+                <div className="archived-header">
+                  <h3>Archived Tournaments</h3>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => setShowArchived((prev) => !prev)}
+                  >
+                    {showArchived ? 'Hide' : `Show (${archivedTournaments.length})`}
+                  </button>
+                </div>
+                {showArchived && (
+                  <div className="admin-list">
+                    {archivedTournaments.length === 0 ? (
+                      <p>No archived tournaments.</p>
+                    ) : (
+                      archivedTournaments.map((tournament) => (
+                        <div className="admin-list-item" key={tournament.id}>
+                          <div>
+                            <strong>{tournament.name}</strong>
+                            <p>
+                              {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
+                              {getMatchFormatLabel(tournament.matchFormat)} · {tournament.eventDate ?? 'No date'}
+                            </p>
+                          </div>
+                          <div className="admin-list-actions">
+                            <button
+                              className="secondary-button"
+                              type="button"
+                              onClick={() => {
+                                const url = `${window.location.origin}${window.location.pathname}?tournamentId=${tournament.id}`;
+                                copyToClipboard(url).then(() => {
+                                  setStatusMessage('🔗 Share link copied to clipboard!');
+                                }).catch(() => {
+                                  setStatusMessage('Failed to copy link. Please copy the URL manually.');
+                                });
+                              }}
+                              title="Copy spectator share link"
+                            >
+                              🔗 Share
+                            </button>
+                            <button
+                              className="danger-button"
+                              onClick={() => void deleteTournament(tournament.id)}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="panel-form">
@@ -2339,8 +2743,148 @@ function App() {
               </div>
             </div>
           </div>
-        )}
-      </section>
+        </section>
+      )}
+
+      {/* ── Auth Modal (Sign In / Sign Up) ── */}
+      {showAuthModal && (
+        <div className="auth-modal-overlay">
+          <div className="auth-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="auth-modal-close" type="button" onClick={closeAuthModal}>
+              ×
+            </button>
+
+            <div className="auth-modal-header">
+              <h3>{isSignUpMode ? 'Create Account' : 'Admin Sign In'}</h3>
+              <p className="auth-modal-desc">
+                {isSignUpMode
+                  ? 'Register a new owner account to manage tournaments, players, and teams.'
+                  : 'Sign in with your owner account to manage tournaments, players, and teams.'}
+              </p>
+            </div>
+
+            {isSignUpMode ? (
+              <>
+                {signUpStep === 'form' ? (
+                  <form className="auth-modal-form" onSubmit={handleSignUp}>
+                    <label>
+                      Email
+                      <input
+                        type="email"
+                        value={signUpForm.email}
+                        onChange={(e) =>
+                          setSignUpForm((prev) => ({ ...prev, email: e.target.value }))
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      Password
+                      <input
+                        type="password"
+                        value={signUpForm.password}
+                        onChange={(e) =>
+                          setSignUpForm((prev) => ({ ...prev, password: e.target.value }))
+                        }
+                        required
+                        minLength={8}
+                      />
+                    </label>
+                    <label>
+                      Confirm Password
+                      <input
+                        type="password"
+                        value={signUpForm.confirmPassword}
+                        onChange={(e) =>
+                          setSignUpForm((prev) => ({ ...prev, confirmPassword: e.target.value }))
+                        }
+                        required
+                        minLength={8}
+                      />
+                    </label>
+                    <button className="primary-button" type="submit">
+                      Sign Up
+                    </button>
+                  </form>
+                ) : (
+                  <form className="auth-modal-form" onSubmit={handleConfirmSignUp}>
+                    <p className="auth-modal-info">
+                      A confirmation code has been sent to <strong>{signUpForm.email}</strong>.
+                      Please enter it below to complete registration.
+                    </p>
+                    <label>
+                      Confirmation Code
+                      <input
+                        type="text"
+                        value={signUpForm.confirmationCode}
+                        onChange={(e) =>
+                          setSignUpForm((prev) => ({ ...prev, confirmationCode: e.target.value }))
+                        }
+                        placeholder="Enter the 6-digit code"
+                        required
+                      />
+                    </label>
+                    <button className="primary-button" type="submit">
+                      Confirm & Sign In
+                    </button>
+                  </form>
+                )}
+              </>
+            ) : (
+              <form className="auth-modal-form" onSubmit={handleOwnerSignIn}>
+                <label>
+                  Email
+                  <input
+                    type="email"
+                    value={ownerLogin.email}
+                    onChange={(event) =>
+                      setOwnerLogin((current) => ({
+                        ...current,
+                        email: event.target.value,
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <label>
+                  Password
+                  <input
+                    type="password"
+                    value={ownerLogin.password}
+                    onChange={(event) =>
+                      setOwnerLogin((current) => ({
+                        ...current,
+                        password: event.target.value,
+                      }))
+                    }
+                    required
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  Sign In
+                </button>
+              </form>
+            )}
+
+            {authError ? <p className="error-text auth-modal-error">{authError}</p> : null}
+
+            <div className="auth-modal-footer">
+              <span>
+                {isSignUpMode
+                  ? 'Already have an account?'
+                  : "Don't have an account?"}
+              </span>
+              <button
+                className="link-button"
+                type="button"
+                onClick={switchAuthMode}
+              >
+                {isSignUpMode ? 'Sign In' : 'Create Account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
