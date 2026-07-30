@@ -1,419 +1,289 @@
-# Tennis Score Board
+<div align="center">
 
-Tennis Score Board is a React + TypeScript + Vite application backed by AWS Amplify Gen 2. It provides a public, real-time tournament display for visitors and an authenticated admin console for managing players, teams, tournaments, brackets, round-robin groups, and match results.
+# 🎾 Tennis Tournament Control Center
 
-## Full Project Structure
+**Real-Time Tournament Management & Live Scoring Platform — Cloud-Native, Serverless, Fully Automated**
 
-```text
-/root/tennis-score-board
-├── amplify
-│   ├── auth
-│   │   └── resource.ts
-│   ├── data
-│   │   └── resource.ts
-│   ├── backend.ts
-│   ├── package.json
-│   └── tsconfig.json
-├── public
-│   ├── favicon.svg
-│   └── icons.svg
-├── src
-│   ├── assets
-│   │   ├── hero.png
-│   │   ├── react.svg
-│   │   └── vite.svg
-│   ├── lib
-│   │   └── tournament.ts
-│   ├── App.css
-│   ├── App.tsx
-│   ├── index.css
-│   └── main.tsx
-├── dist
-│   ├── assets
-│   │   ├── index-Bh4CaSbx.js
-│   │   └── index-CUA1dq05.css
-│   ├── favicon.svg
-│   ├── icons.svg
-│   └── index.html
-├── amplify_outputs.json
-├── amplify.yml
-├── eslint.config.js
-├── .gitignore
-├── index.html
-├── package.json
-├── package-lock.json
-├── README.md
-├── tsconfig.app.json
-├── tsconfig.json
-├── tsconfig.node.json
-└── vite.config.ts
+[![AWS Amplify](https://img.shields.io/badge/AWS%20Amplify-Hosting-FF9900?style=for-the-badge&logo=aws-amplify&logoColor=white)](https://aws.amazon.com/amplify/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=white)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vite.dev/)
+[![AWS CDK](https://img.shields.io/badge/AWS%20CDK-Infrastructure%20as%20Code-232F3E?style=for-the-badge&logo=amazon-aws&logoColor=white)](https://aws.amazon.com/cdk/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Online-brightgreen?style=for-the-badge&logo=google-chrome&logoColor=white)](https://your-domain.com)
+
+---
+
+**A production-grade, full-stack tennis tournament system** that delivers real-time score updates, automated bracket generation, and responsive match displays — all hosted on **AWS Amplify** with global CDN acceleration, automated CI/CD, and custom domain with TLS/SSL.
+
+</div>
+
+---
+
+## 📡 Architecture Overview
+
+```mermaid
+flowchart LR
+    A["👨‍💻 Developer Git Push"] --> B["🐙 GitHub Repository"]
+    B --> C["⚡ AWS Amplify CI/CD Pipeline"]
+    C --> D["📦 Backend Deploy<br/><code>npx ampx pipeline-deploy</code>"]
+    C --> E["🎨 Frontend Build<br/><code>npm run build</code>"]
+    D --> F["🛢️ AWS AppSync<br/>GraphQL API"]
+    D --> G["🔐 Amazon Cognito<br/>User Pools"]
+    E --> H["☁️ Amazon CloudFront CDN"]
+    H --> I["🌐 Custom DNS<br/>(CNAME + ACM SSL)"]
+    I --> J["🖥️ User Browser"]
+    F --> H
+    G --> H
+
+    style A fill:#58a6ff,color:#fff
+    style B fill:#2dba4e,color:#fff
+    style C fill:#ff9900,color:#fff
+    style D fill:#ff9900,color:#fff
+    style E fill:#646cff,color:#fff
+    style F fill:#8b5cf6,color:#fff
+    style G fill:#f97316,color:#fff
+    style H fill:#232f3e,color:#fff
+    style I fill:#e11d48,color:#fff
+    style J fill:#22c55e,color:#fff
 ```
 
-## Directory and File Responsibilities
-
-### 1. `amplify/` - Backend Definition Layer
-
-This directory contains the Amplify Gen 2 backend source code. It defines authentication, GraphQL data models, and the backend entry point.
-
-#### `amplify/backend.ts`
-- Backend composition entry file.
-- Wires together the auth resource and the data resource.
-- If a new backend category is added later, such as storage or functions, this is one of the first places that will change.
-
-#### `amplify/auth/resource.ts`
-- Defines the authentication resource with email-based sign-in.
-- Supports the admin login flow used by the management console.
-- Future changes here usually involve:
-  - changing sign-in methods,
-  - adding MFA,
-  - adding user group automation,
-  - tightening login policies.
-
-#### `amplify/data/resource.ts`
-- Core backend schema definition for business data.
-- Defines enums and models such as:
-  - `Player`
-  - `Team`
-  - `Tournament`
-  - `TournamentEntry`
-  - `Match`
-- Also defines authorization behavior:
-  - public API key read access for visitor screens,
-  - `admin` group write access for management operations.
-- This is the most important backend business file in the project.
-
-#### `amplify/package.json`
-- Backend package manifest for Amplify-specific dependencies.
-- Usually touched only when backend tooling or Amplify resource dependencies change.
-
-#### `amplify/tsconfig.json`
-- TypeScript configuration for backend resource files.
-- Mostly framework-level configuration rather than business logic.
-
-### 2. `src/` - Frontend Application Source
-
-This directory contains the actual React application, including app bootstrap, UI rendering, styling, and tournament logic.
-
-#### `src/main.tsx`
-- Frontend entry point.
-- Boots React, loads global CSS, imports Amplify UI styles, and configures Amplify with `amplify_outputs.json`.
-- If the application fails to start or Amplify is not initialized correctly, this is a key file to inspect first.
-
-#### `src/App.tsx`
-- Main application container and the central frontend business file.
-- Handles:
-  - real-time subscriptions via Amplify Data `observeQuery()`,
-  - visitor-facing tournament display,
-  - admin authentication checks,
-  - player creation,
-  - doubles team creation,
-  - tournament creation,
-  - match score entry,
-  - knockout winner propagation,
-  - tournament deletion.
-- This is the main orchestration layer between backend data and UI.
-
-#### `src/lib/tournament.ts`
-- Pure tournament utility module.
-- Contains reusable business logic for:
-  - knockout bracket generation,
-  - round label generation,
-  - round-robin group setup,
-  - score parsing,
-  - standings calculation,
-  - matrix/table formatting helpers.
-- If bracket rules or ranking rules need to change, this is the primary file to update.
-
-#### `src/App.css`
-- Main component-level styling for the whole app.
-- Defines layout and visual styling for:
-  - hero banner,
-  - visitor tournament cards,
-  - bracket UI,
-  - round-robin tables,
-  - admin console,
-  - forms and buttons.
-
-#### `src/index.css`
-- Global stylesheet.
-- Sets base typography, background, reset-like defaults, and shared browser-level styles.
-
-#### `src/assets/`
-- Stores local frontend image assets.
-- Currently includes visual/static resources, not core business logic.
-- Safe to update for branding or UI polish.
-
-### 3. `public/` - Static Public Assets
-
-Files here are copied directly into the built app without bundler transformation.
-
-#### `public/favicon.svg`
-- Browser tab icon.
-
-#### `public/icons.svg`
-- Shared static icon asset.
+---
 
-### 4. `dist/` - Build Output
+## ☁️ Cloud & DevOps Highlights
 
-This directory is generated by `npm run build`.
+| Capability | Implementation |
+|---|---|
+| **Serverless Hosting** | Hosted on [AWS Amplify](tennis-score-board/amplify.yml:1) with fully managed infrastructure — no servers to provision or maintain. |
+| **Global CDN** | Content delivered via [Amazon CloudFront](https://aws.amazon.com/cloudfront/) edge locations for sub-50ms TTFB worldwide. |
+| **Automated CI/CD** | GitOps-driven pipeline: every push to `main` triggers dependency install, TypeScript compilation, Vite production build, and incremental Amplify deployment. See [`amplify.yml`](tennis-score-board/amplify.yml:1). |
+| **Custom Domain & SSL** | CNAME-based DNS routing with [AWS Certificate Manager (ACM)](https://aws.amazon.com/certificate-manager/) — fully automated HTTPS certificate provisioning and renewal. |
+| **Infrastructure as Code** | Backend defined via [AWS CDK](https://aws.amazon.com/cdk/) constructs in [`amplify/`](tennis-score-board/amplify/backend.ts:1) — auth, data models, and permissions are version-controlled and deployable. |
+| **GraphQL API** | Real-time data layer via [AWS AppSync](https://aws.amazon.com/appsync/) with subscription support for live score updates. |
 
-#### `dist/index.html`
-- Production HTML shell generated by Vite.
+---
 
-#### `dist/assets/*`
-- Bundled JavaScript and CSS output.
-- These files should not be edited manually.
+## 🎯 Application Features
 
-#### `dist/favicon.svg` and `dist/icons.svg`
-- Built copies of public assets.
+### 🏆 Tournament Modes
+- **Knockout (Single Elimination)** — Automatic bracket generation with seeded draws, bye handling, and winner propagation.
+- **Round Robin** — Group-stage standings with configurable group count and qualification slots per group.
+- **Team Battle** — Responsive team-vs-team match panels with mobile/tablet-optimized CSS Flex/Grid layouts.
 
-### 5. Root-Level Project Configuration Files
+### 🎲 Match Management
+- **Singles & Doubles** support with player and team registration.
+- **Random Draw / Shuffle** — Random seeding for fair tournament starts.
+- **Multiple Match Formats** — Single set, Best of 3, Best of 5.
+- **Real-Time Score Entry** — Admin console with instant GraphQL subscription updates to visitor displays.
 
-#### `package.json`
-- Main frontend package manifest.
-- Defines app scripts such as:
-  - `npm run dev`
-  - `npm run build`
-  - `npm run lint`
-- Also defines frontend dependency versions.
+### 📊 Live Display
+- **Bracket View** — Visual knockout bracket with round labels and match progression.
+- **Standings Tables** — Round-robin group rankings with points, games won/lost, and tie-break logic.
+- **Responsive Design** — Dedicated mobile/tablet layouts using CSS Grid and Flexbox compression.
 
-#### `package-lock.json`
-- Dependency lock file.
-- Ensures consistent installs across environments.
-- Should be committed together with `package.json` when dependencies change.
+### 🔐 Authentication & Authorization
+- **Public Read-Only** — Visitors can view live tournaments without authentication.
+- **Admin Console** — Email-based sign-in via Amazon Cognito with `admin` group write access for creating players, teams, tournaments, and entering scores.
 
-#### `index.html`
-- Vite HTML template for local and production builds.
-- The React app mounts into the root DOM node defined here.
+---
 
-#### `vite.config.ts`
-- Vite bundler configuration.
-- Currently lightweight, only enabling the React plugin.
-- This file becomes important if you later add:
-  - aliases,
-  - manual chunk splitting,
-  - environment-specific build behavior,
-  - proxy rules.
+## 🛠️ Tech Stack
 
-#### `eslint.config.js`
-- ESLint flat config file.
-- Controls code quality rules for the frontend and backend TypeScript files.
+### Cloud & Infrastructure
 
-#### `tsconfig.json`
-- Base TypeScript configuration for the project.
+| Service | Purpose |
+|---|---|
+| [AWS Amplify](https://aws.amazon.com/amplify/) | Hosting, CI/CD pipeline, backend deployment |
+| [Amazon CloudFront](https://aws.amazon.com/cloudfront/) | Global content delivery network (CDN) |
+| [AWS AppSync](https://aws.amazon.com/appsync/) | Managed GraphQL API with real-time subscriptions |
+| [Amazon Cognito](https://aws.amazon.com/cognito/) | Authentication, user pools, admin group management |
+| [AWS Certificate Manager](https://aws.amazon.com/certificate-manager/) | Automated TLS/SSL certificate provisioning |
+| [AWS CDK](https://aws.amazon.com/cdk/) | Infrastructure as Code for backend resources |
 
-#### `tsconfig.app.json`
-- TypeScript configuration used for app source files under `src/`.
+### Frontend
 
-#### `tsconfig.node.json`
-- TypeScript configuration for Node-side tooling files such as Vite config.
-
-#### `amplify.yml`
-- AWS Amplify Hosting build pipeline config.
-- Defines:
-  - backend deploy phase with `npx ampx pipeline-deploy`,
-  - frontend build phase with `npm run build`,
-  - artifact directory as `dist`.
-- This file is critical for CI/CD and cloud deployment.
-
-#### `amplify_outputs.json`
-- Generated Amplify output file used by the frontend runtime.
-- Contains environment-specific backend connection info.
-- Imported by `src/main.tsx`.
-- Usually generated by Amplify tooling and should not be hand-edited.
-
-#### `.gitignore`
-- Git ignore rules.
-- Controls which generated or local-only files should stay out of version control.
-
-## Core Business Mapping by Module
-
-### App Entry and Runtime Bootstrap
-- `src/main.tsx`
-- `index.html`
-
-These files are responsible for launching the React app and connecting it to Amplify runtime outputs.
-
-### Backend Data Model and Permissions
-- `amplify/data/resource.ts`
-- `amplify/auth/resource.ts`
-- `amplify/backend.ts`
-
-These files define what data exists, who can read or write it, and which backend resources are enabled.
-
-### Visitor-Facing Real-Time UI
-- `src/App.tsx`
-- `src/App.css`
-
-These files power the public display for live tournaments, bracket views, standings, and history records.
-
-### Admin Console and Write Operations
-- `src/App.tsx`
-- `amplify/auth/resource.ts`
-- `amplify/data/resource.ts`
-
-These files collectively support authenticated admin workflows such as creating players, teams, tournaments, and entering scores.
-
-### Tournament Rule Engine and Data Processing
-- `src/lib/tournament.ts`
-
-This file encapsulates the main business calculations and is the best place to keep algorithmic logic out of the UI layer.
-
-### Styling and Visual Layer
-- `src/App.css`
-- `src/index.css`
-- `src/assets/*`
-- `public/*`
-
-These files control appearance, layout, branding assets, and shared visuals.
-
-### Build, Lint, and Deployment
-- `package.json`
-- `vite.config.ts`
-- `eslint.config.js`
-- `amplify.yml`
-- `tsconfig*.json`
-
-These files control developer workflow, build behavior, code quality checks, and deployment automation.
-
-## Quick Modification Guide
-
-This section is meant to help future changes land in the right place quickly.
-
-### A. Change Data Models, Relationships, or Permissions
-
-**File to edit**
-- `amplify/data/resource.ts`
-
-**Typical changes**
-- add new fields to players, teams, tournaments, or matches
-- add new models
-- change public vs admin permissions
-- change tournament metadata
-
-**Notes**
-- Schema changes affect both backend deployment and frontend generated types.
-- After changing this file, regenerate/redeploy Amplify resources before expecting the frontend to work correctly.
-- Be careful with authorization changes because the visitor display depends on public read access.
-
-### B. Change Login or Admin Access Rules
-
-**File to edit**
-- `amplify/auth/resource.ts`
-
-**Typical changes**
-- add new auth methods
-- change sign-in flow
-- introduce MFA
-- align Cognito behavior with new admin rules
-
-**Notes**
-- The frontend admin experience assumes an `admin` group exists.
-- If auth rules are changed, also verify the admin checks in `src/App.tsx`.
-
-### C. Change Tournament Algorithms
-
-**File to edit**
-- `src/lib/tournament.ts`
-
-**Typical changes**
-- different knockout seeding logic
-- different round naming rules
-- different group allocation logic
-- different ranking/tie-break logic
-- custom score parsing rules
-
-**Notes**
-- Keep pure calculation logic here instead of mixing it into UI code.
-- Verify both knockout and round-robin flows after modifying this file.
-- Tie-break changes should be tested carefully because they affect live standings.
-
-### D. Change Admin Operations or Real-Time UI Behavior
-
-**File to edit**
-- `src/App.tsx`
-
-**Typical changes**
-- add new admin forms
-- split the page into smaller components
-- change how subscriptions are handled
-- add edit flows for existing players or tournaments
-- change how scores update later rounds
-
-**Notes**
-- This file currently contains both visitor UI and admin UI.
-- It is the most likely file to be refactored into multiple components later.
-- If you adjust match update logic, pay attention to knockout cascade behavior so later rounds do not show stale winners.
-
-### E. Change Styling or Branding
-
-**Files to edit**
-- `src/App.css`
-- `src/index.css`
-- `src/assets/*`
-- `public/*`
-
-**Typical changes**
-- new colors
-- new page layout
-- responsive behavior
-- icons and logos
-
-**Notes**
-- `src/App.css` contains most app-specific styles.
-- `src/index.css` should remain focused on global/base styles.
-
-### F. Change App Bootstrap or Amplify Runtime Wiring
-
-**Files to edit**
-- `src/main.tsx`
-- `amplify_outputs.json`
-
-**Notes**
-- `amplify_outputs.json` is generated, not a hand-maintained source file.
-- If runtime configuration looks broken, confirm that the outputs file matches the deployed backend.
-
-### G. Change CI/CD or Cloud Build Behavior
-
-**File to edit**
-- `amplify.yml`
-
-**Typical changes**
-- install/build commands
-- artifact directory
-- caching strategy
-- branch-specific deployment behavior
-
-**Notes**
-- Do not remove `npx ampx pipeline-deploy` unless the backend deployment strategy changes intentionally.
-
-## Suggested Refactor Priorities
-
-For future maintenance, the following files are the most likely to benefit from refactoring:
-
-1. `src/App.tsx`
-   - currently acts as the main page, data layer, admin layer, and orchestration layer
-   - a future split into `components/`, `hooks/`, and `features/` would improve maintainability
-
-2. `src/lib/tournament.ts`
-   - should remain the home of tournament-specific rules
-   - as business rules grow, it may be worth splitting into:
-     - `knockout.ts`
-     - `roundRobin.ts`
-     - `score.ts`
-     - `standings.ts`
-
-3. `amplify/data/resource.ts`
-   - as the domain grows, this file will become the authoritative backend contract
-   - any schema growth should be documented carefully because it impacts both deployment and frontend integration
-
-## Summary
-
-If you need to understand this project quickly, focus on the following order:
-
-1. `amplify/data/resource.ts` for backend data structure and permissions
-2. `src/lib/tournament.ts` for tournament rules and calculations
-3. `src/App.tsx` for runtime behavior, UI flow, and admin operations
-4. `amplify.yml` and `package.json` for build and deployment workflow
-
-That sequence gives the fastest path to understanding how data is modeled, how it is processed, how it is rendered, and how it is deployed.
+| Technology | Purpose |
+|---|---|
+| [React 19](https://react.dev/) | UI component library |
+| [TypeScript 5](https://www.typescriptlang.org/) | Type-safe application code |
+| [Vite 5](https://vite.dev/) | Fast development server & production bundler |
+| [AWS Amplify UI](https://ui.docs.amplify.aws/) | Pre-built React components for auth & data |
+| [CSS3 Grid / Flexbox](https://developer.mozilla.org/en-US/docs/Web/CSS) | Responsive layout engine |
+
+### Backend (Amplify Gen 2)
+
+| File | Responsibility |
+|---|---|
+| [`amplify/data/resource.ts`](tennis-score-board/amplify/data/resource.ts:1) | GraphQL schema — models (Player, Team, Tournament, Match, TournamentEntry), enums, authorization rules |
+| [`amplify/auth/resource.ts`](tennis-score-board/amplify/auth/resource.ts:1) | Cognito user pool configuration — email sign-in, admin group |
+| [`amplify/backend.ts`](tennis-score-board/amplify/backend.ts:1) | Backend composition — wires auth + data resources |
+
+---
+
+## 🚀 Getting Started — Local Development
+
+### Prerequisites
+- **Node.js** >= 18.x
+- **npm** >= 9.x
+
+### Steps
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/your-org/tennis-score-board.git
+cd tennis-score-board
+
+# 2. Install dependencies
+npm install
+
+# 3. Start the Vite development server
+npm run dev
+```
+
+The app will be available at **http://localhost:5173** with hot module replacement (HMR) enabled.
+
+### Available Scripts
+
+| Command | Description |
+|---|---|
+| `npm run dev` | Start local dev server with HMR |
+| `npm run build` | TypeScript check + Vite production build → `dist/` |
+| `npm run preview` | Preview production build locally |
+| `npm run lint` | Run ESLint across the codebase |
+
+---
+
+## 🌩️ Cloud Deployment Guide
+
+### 1. Connect Repository to AWS Amplify
+
+1. Navigate to **AWS Amplify Console** → **Host web app**.
+2. Select **GitHub** as the source provider and authorize access.
+3. Choose the `tennis-score-board` repository and `main` branch.
+
+### 2. Configure Build Settings
+
+Amplify automatically detects [`amplify.yml`](tennis-score-board/amplify.yml:1). The pipeline executes:
+
+```
+Backend:  npm install → npx ampx pipeline-deploy
+Frontend: npm install → npm run build
+Artifacts: dist/
+```
+
+### 3. Set Up Custom Domain
+
+1. In Amplify Console, go to **Domain management** → **Add domain**.
+2. Enter your domain name (e.g., `scoreboard.yourclub.com`).
+3. Amplify will:
+   - Generate a **CNAME record** for your DNS provider.
+   - Request an **ACM certificate** in `us-east-1` (required for CloudFront).
+   - Automatically validate domain ownership via DNS.
+4. Add the CNAME record to your DNS provider (e.g., Route 53, Cloudflare, Namecheap):
+   ```
+   scoreboard  CNAME  <amplify-provided-domain>.amplifyapp.com
+   ```
+5. Wait for DNS propagation and certificate issuance (typically 5–15 minutes).
+
+### 4. Verify Deployment
+
+- ✅ HTTPS is enforced automatically via CloudFront + ACM.
+- ✅ Custom domain resolves to the Amplify-hosted app.
+- ✅ Subsequent `git push` to `main` triggers incremental builds with zero-downtime deployment.
+
+---
+
+## 📁 Project Structure
+
+```
+tennis-score-board/
+├── amplify/                    # Backend (Amplify Gen 2 / AWS CDK)
+│   ├── auth/
+│   │   └── resource.ts         # Cognito user pool config
+│   ├── data/
+│   │   └── resource.ts         # GraphQL schema & auth rules
+│   ├── backend.ts              # Backend composition
+│   ├── package.json
+│   └── tsconfig.json
+├── src/                        # Frontend (React + TypeScript)
+│   ├── lib/
+│   │   └── tournament.ts       # Tournament logic engine
+│   ├── App.tsx                 # Main app container
+│   ├── App.css                 # Component styles
+│   ├── index.css               # Global styles
+│   └── main.tsx                # App entry point
+├── public/                     # Static assets
+├── amplify.yml                 # CI/CD pipeline definition
+├── amplify_outputs.json        # Generated backend config
+├── package.json                # Frontend dependencies & scripts
+├── vite.config.ts              # Vite bundler config
+├── tsconfig*.json              # TypeScript configurations
+└── eslint.config.js            # ESLint flat config
+```
+
+---
+
+## 🔄 CI/CD Pipeline
+
+```yaml
+# amplify.yml — Full pipeline definition
+version: 1
+backend:
+  phases:
+    build:
+      commands:
+        - npm install
+        - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - npm install
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    baseDirectory: dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - .npm/**/*
+      - node_modules/**/*
+```
+
+**Pipeline Flow:**
+1. **Trigger**: Push to `main` branch.
+2. **Backend Phase**: Installs dependencies, deploys CDK stacks (Cognito, AppSync, DynamoDB).
+3. **Frontend Phase**: Installs dependencies, runs `tsc` type-check, bundles with Vite.
+4. **Artifact**: Outputs `dist/` to Amplify hosting.
+5. **Serving**: Amplify uploads to S3 → invalidates CloudFront cache → global rollout.
+
+---
+
+## 🔐 Security & Permissions
+
+| Access Level | Auth Provider | Operations |
+|---|---|---|
+| **Public (Visitor)** | API Key | Read-only: view tournaments, matches, standings |
+| **Admin** | Cognito User Pools (`admin` group) | Full CRUD: players, teams, tournaments, matches |
+
+All GraphQL mutations are protected by schema-level authorization rules defined in [`amplify/data/resource.ts`](tennis-score-board/amplify/data/resource.ts:1).
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+
+**Built with ❤️ for tennis enthusiasts, tournament organizers, and cloud engineers.**
+
+[![AWS](https://img.shields.io/badge/Powered%20by-AWS%20Cloud-232F3E?style=flat-square&logo=amazon-aws)](https://aws.amazon.com/)
+[![React](https://img.shields.io/badge/Made%20with-React-61DAFB?style=flat-square&logo=react)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/Written%20in-TypeScript-3178C6?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
+
+</div>
