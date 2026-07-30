@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useMemo, useState } from 'react';
 import {
-  fetchAuthSession,
   getCurrentUser,
   signIn,
   signOut,
@@ -183,7 +182,6 @@ function App() {
 
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authView, setAuthView] = useState<'visitor' | 'owner'>('visitor');
   const [ownerLogin, setOwnerLogin] = useState({ email: '', password: '' });
   const [authError, setAuthError] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -660,7 +658,6 @@ function App() {
     setEntries([]);
     setMatches([]);
     setIsAuthenticated(false);
-    setAuthView('visitor');
     setShowAuthModal(false);
   }
 
