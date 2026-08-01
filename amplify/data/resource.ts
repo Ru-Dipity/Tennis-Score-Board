@@ -22,8 +22,7 @@ const schema = a.schema({
       name: a.string().required(),
       gender: a.ref('Gender').required(),
       isActive: a.boolean().required(),
-      createdTeamsAsPlayerOne: a.hasMany('Team', 'playerOneId'),
-      createdTeamsAsPlayerTwo: a.hasMany('Team', 'playerTwoId'),
+      teamMemberships: a.hasMany('TeamMember', 'playerId'),
       singlesEntries: a.hasMany('TournamentEntry', 'playerId'),
     })
     .authorization((allow) => [
@@ -34,11 +33,33 @@ const schema = a.schema({
   Team: a
     .model({
       name: a.string().required(),
-      playerOneId: a.id().required(),
-      playerTwoId: a.id().required(),
-      playerOne: a.belongsTo('Player', 'playerOneId'),
-      playerTwo: a.belongsTo('Player', 'playerTwoId'),
+      members: a.hasMany('TeamMember', 'teamId'),
       tournamentEntries: a.hasMany('TournamentEntry', 'teamId'),
+    })
+    .authorization((allow) => [
+      allow.publicApiKey().to(['read']),
+      allow.owner(),
+    ]),
+
+  TeamMember: a
+    .model({
+      teamId: a.id().required(),
+      team: a.belongsTo('Team', 'teamId'),
+      playerId: a.id().required(),
+      player: a.belongsTo('Player', 'playerId'),
+      order: a.integer(),
+    })
+    .authorization((allow) => [
+      allow.publicApiKey().to(['read']),
+      allow.owner(),
+    ]),
+
+  EventGroup: a
+    .model({
+      name: a.string().required(),
+      eventDate: a.string().required(),
+      isArchived: a.boolean().default(false),
+      events: a.hasMany('Tournament', 'eventGroupId'),
     })
     .authorization((allow) => [
       allow.publicApiKey().to(['read']),
@@ -48,6 +69,9 @@ const schema = a.schema({
   Tournament: a
     .model({
       name: a.string().required(),
+      eventName: a.string(),
+      eventGroupId: a.id(),
+      eventGroup: a.belongsTo('EventGroup', 'eventGroupId'),
       mode: a.ref('TournamentMode').required(),
       eventType: a.ref('EventType').required(),
       status: a.ref('TournamentStatus').required(),

@@ -119,6 +119,41 @@ export function createEmptyScoreInputs(matchFormat: MatchFormat) {
   return Array.from({ length: getBestOf(matchFormat) }, () => '');
 }
 
+/**
+ * Resolve the knockout match that a completed match's winner advances to.
+ * The bracket maps match N in round R to match ceil(N/2) in round R+1.
+ */
+export function getKnockoutSuccessor(current: {
+  roundNumber: number;
+  matchNumber: number;
+}) {
+  return {
+    roundNumber: current.roundNumber + 1,
+    matchNumber: Math.ceil(current.matchNumber / 2),
+  };
+}
+
+/** A score line is confirmable only when it evaluates to a valid winner. */
+export function isMatchScoreValid(
+  participantAInputs: Array<string | number | null | undefined>,
+  participantBInputs: Array<string | number | null | undefined>,
+  matchFormat: MatchFormat,
+) {
+  return evaluateMatchScore(participantAInputs, participantBInputs, matchFormat) !== null;
+}
+
+/** Human-readable status label for a match. */
+export function getMatchStatusLabel(status: MatchStatus) {
+  switch (status) {
+    case 'COMPLETED':
+      return 'Completed';
+    case 'IN_PROGRESS':
+      return 'In Progress';
+    default:
+      return 'Pending';
+  }
+}
+
 export function createRoundLabels(bracketSize: number, customLabels: string[] = []) {
   const rounds = Math.log2(bracketSize);
   const labels: string[] = [];
@@ -149,15 +184,6 @@ export function createRoundLabels(bracketSize: number, customLabels: string[] = 
   return labels;
 }
 
-export function shuffleSelectedParticipants(items: string[]) {
-  const shuffled = [...items];
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
-  }
-  return shuffled;
-}
-
 function getStandardCategory(eventType: EventType): MatchCategory {
   return eventType === 'DOUBLES' ? 'STANDARD_DOUBLES' : 'STANDARD_SINGLES';
 }
@@ -179,26 +205,33 @@ function defaultTeamLabel(index: number) {
 }
 
 export function buildKnockoutPlan(
-  participants: ParticipantSeed[],
+  firstRoundMatches: number,
   customLabels: string[] = [],
   matchFormat: MatchFormat = 'BEST_OF_3',
   eventType: EventType = 'SINGLES',
 ) {
-  const bracketSize = nextPowerOfTwo(participants.length);
+  // The admin defines the first-round match count; that defines the number of
+  // participants who play in round 1. The bracket is padded up to the next
+  // power of two, and empty slots become BYEs placed from the bracket edges
+  // inward so both halves of the draw receive them evenly (standard draw rules).
+  const firstRoundParticipantCount = Math.max(1, Math.floor(firstRoundMatches || 1)) * 2;
+  const bracketSize = Math.max(nextPowerOfTwo(firstRoundParticipantCount), 2);
   const roundLabels = createRoundLabels(bracketSize, customLabels);
 
-  const entries: EntryPlan[] = Array.from({ length: bracketSize }, (_, index) => {
-    const participant = participants[index];
-    return {
-      seed: index + 1,
-      entryName: participant?.displayName ?? 'BYE',
-      participantType: participant?.participantType ?? 'PLAYER',
-      playerId: participant?.playerId,
-      teamId: participant?.teamId,
-      slotNumber: index + 1,
-      isBye: !participant,
-    };
-  });
+  const byeCount = bracketSize - firstRoundParticipantCount;
+  const byeSlots = new Set<number>();
+  for (let index = 0; index < byeCount; index += 1) {
+    const offset = Math.floor(index / 2);
+    byeSlots.add(index % 2 === 0 ? offset + 1 : bracketSize - offset);
+  }
+
+  const entries: EntryPlan[] = Array.from({ length: bracketSize }, (_, index) => ({
+    seed: index + 1,
+    entryName: byeSlots.has(index + 1) ? 'BYE' : 'TBD',
+    participantType: 'PLAYER' as const,
+    slotNumber: index + 1,
+    isBye: byeSlots.has(index + 1),
+  }));
 
   const entryNames = seedNameMap(entries);
   const matches: MatchPlan[] = [];
@@ -207,6 +240,7 @@ export function buildKnockoutPlan(
   for (let matchIndex = 0; matchIndex < bracketSize / 2; matchIndex += 1) {
     const entryA = entries[matchIndex * 2];
     const entryB = entries[matchIndex * 2 + 1];
+    const isByeMatch = entryA.isBye || entryB.isBye;
     const match: MatchPlan = {
       stage: 'KNOCKOUT',
       status: 'PENDING',
@@ -215,19 +249,13 @@ export function buildKnockoutPlan(
       matchNumber: matchIndex + 1,
       displayOrder,
       participantASeeds: entryA.isBye ? undefined : [entryA.seed],
-      participantAName: entryA.isBye ? undefined : entryA.entryName,
+      participantAName: entryA.isBye ? 'BYE' : undefined,
       participantBSeeds: entryB.isBye ? undefined : [entryB.seed],
-      participantBName: entryB.isBye ? undefined : entryB.entryName,
+      participantBName: entryB.isBye ? 'BYE' : undefined,
+      score: isByeMatch ? 'BYE' : undefined,
       matchFormat,
       matchCategory: getStandardCategory(eventType),
     };
-
-    if (entryA.isBye !== entryB.isBye) {
-      match.status = 'COMPLETED';
-      match.score = 'BYE';
-      match.winnerSeeds = entryA.isBye ? [entryB.seed] : [entryA.seed];
-      match.winnerSide = entryA.isBye ? 'B' : 'A';
-    }
 
     matches.push(match);
     displayOrder += 1;
@@ -350,26 +378,28 @@ export function buildRoundRobinPlan(
 export function buildTeamBattlePlan(
   participants: ParticipantSeed[],
   teamCount: number,
-  teamSize: number,
-  teamLabels: string[],
+  singlesPerDuel: number,
+  doublesPerDuel: number,
   matchFormat: MatchFormat = 'BEST_OF_3',
 ) {
   if (teamCount < 2) {
     throw new Error('Team battle requires at least 2 teams.');
   }
 
-  if (participants.length !== teamCount * teamSize) {
-    throw new Error('Selected players must exactly match teamCount x teamSize.');
+  if (singlesPerDuel < 1) {
+    throw new Error('Team battle requires at least 1 singles match per duel.');
   }
 
-  if (teamSize < 2 || teamSize % 2 !== 0) {
-    throw new Error('Team battle currently requires an even team size of at least 2.');
+  if (doublesPerDuel < 1) {
+    throw new Error('Team battle requires at least 1 doubles match per duel.');
   }
 
-  const resolvedLabels =
-    teamLabels.filter((label) => label.trim()).length === teamCount
-      ? teamLabels.map((label) => label.trim())
-      : Array.from({ length: teamCount }, (_, index) => defaultTeamLabel(index));
+  const resolvedLabels = Array.from({ length: teamCount }, (_, index) => defaultTeamLabel(index));
+
+  // Roster slots per team: large enough to seed every singles slot and every
+  // doubles pairing (index i pairs with index i + doublesPerDuel). Lineups are
+  // later replaced with actual team members when an admin binds a system team.
+  const rosterSize = Math.max(singlesPerDuel, doublesPerDuel * 2);
 
   const entries: EntryPlan[] = [];
   const teamBuckets: EntryPlan[][] = [];
@@ -377,17 +407,21 @@ export function buildTeamBattlePlan(
 
   for (let teamIndex = 0; teamIndex < teamCount; teamIndex += 1) {
     const label = resolvedLabels[teamIndex];
-    const members = participants.slice(teamIndex * teamSize, (teamIndex + 1) * teamSize);
-    const teamEntries = members.map((participant, memberIndex) => ({
-      seed: seed + memberIndex,
-      entryName: participant.displayName,
-      participantType: 'PLAYER' as const,
-      playerId: participant.playerId,
-      groupName: label,
-      slotNumber: memberIndex + 1,
-      isBye: false,
-      teamOrder: memberIndex + 1,
-    }));
+    const members = participants.slice(teamIndex * rosterSize, (teamIndex + 1) * rosterSize);
+    // Always create rosterSize slots per team; empty slots become TBD placeholders.
+    const teamEntries: EntryPlan[] = Array.from({ length: rosterSize }, (_, memberIndex) => {
+      const participant = members[memberIndex];
+      return {
+        seed: seed + memberIndex,
+        entryName: participant?.displayName ?? 'TBD',
+        participantType: 'PLAYER' as const,
+        playerId: participant?.playerId,
+        groupName: label,
+        slotNumber: memberIndex + 1,
+        isBye: false,
+        teamOrder: memberIndex + 1,
+      };
+    });
 
     entries.push(...teamEntries);
     teamBuckets.push(teamEntries);
@@ -404,7 +438,7 @@ export function buildTeamBattlePlan(
       const teamB = teamBuckets[teamBIndex];
       const duelLabel = `${resolvedLabels[teamAIndex]} vs ${resolvedLabels[teamBIndex]}`;
 
-      for (let index = 0; index < teamSize; index += 1) {
+      for (let index = 0; index < singlesPerDuel; index += 1) {
         matches.push({
           stage: 'TEAM_BATTLE',
           status: 'PENDING',
@@ -426,10 +460,15 @@ export function buildTeamBattlePlan(
         displayOrder += 1;
       }
 
-      const pairCount = teamSize / 2;
-      for (let index = 0; index < pairCount; index += 1) {
-        const participantASeeds = [teamA[index].seed, teamA[index + pairCount].seed];
-        const participantBSeeds = [teamB[index].seed, teamB[index + pairCount].seed];
+      for (let index = 0; index < doublesPerDuel; index += 1) {
+        const participantASeeds = [
+          teamA[index].seed,
+          teamA[index + doublesPerDuel].seed,
+        ];
+        const participantBSeeds = [
+          teamB[index].seed,
+          teamB[index + doublesPerDuel].seed,
+        ];
 
         matches.push({
           stage: 'TEAM_BATTLE',
@@ -440,9 +479,9 @@ export function buildTeamBattlePlan(
           displayOrder,
           groupName: 'Doubles',
           participantASeeds,
-          participantAName: `${teamA[index].entryName} / ${teamA[index + pairCount].entryName}`,
+          participantAName: `${teamA[index].entryName} / ${teamA[index + doublesPerDuel].entryName}`,
           participantBSeeds,
-          participantBName: `${teamB[index].entryName} / ${teamB[index + pairCount].entryName}`,
+          participantBName: `${teamB[index].entryName} / ${teamB[index + doublesPerDuel].entryName}`,
           matchFormat,
           matchCategory: 'TEAM_DOUBLES',
           participantATeamLabel: resolvedLabels[teamAIndex],
