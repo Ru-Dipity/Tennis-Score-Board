@@ -80,7 +80,7 @@ flowchart LR
 
 ### 🏆 Tournament Modes
 - **Knockout (Single Elimination)** — Automatic bracket generation with seeded draws, bye handling, and winner propagation.
-- **Round Robin** — Group-stage standings with configurable group count and qualification slots per group.
+- **Round Robin** — Group-stage standings with configurable group count and **per-group player limit**, a real-time match matrix, and click-to-score cells. Supports **singles** (per-slot player dropdowns) and **doubles** (two-player roster modal) entry assignment with live sync to every group match.
 - **Team Battle** — Responsive team-vs-team match panels with lineup editor and mobile/tablet-optimized CSS Flex/Grid layouts.
 
 ### 🎲 Match Management
@@ -89,6 +89,9 @@ flowchart LR
 - **Multiple Match Formats** — Single set, Best of 3, Best of 5.
 - **Real-Time Score Entry** — Admin console with instant GraphQL subscription updates to visitor displays.
 - **Score Clearing** — Reset match scores with a single click for re-scoring.
+- **Round Robin Entry Assignment** — Singles slots render one-player dropdowns; doubles slots open a roster modal with two independent player selectors per row. Selections sync instantly to the standings and to every wired group match (TBD clears a slot back to pending).
+- **Click-to-Score Matrix** — Score-pending matrix cells are clickable and open the shared scoring modal on the exact group match; player info is read directly from the matrix (no re-selection needed — both doubles members are passed intact).
+- **Unified Scoring Modal** — Knockout and round-robin reuse the same scoring panel (Save Score / Confirm Match End / Clear); round-robin shows read-only participant names straight from the matrix.
 
 ### 📅 Date-Based Tournament Schedule & Archive
 - **Event Date Picker** — Assign a specific date to each tournament for organized scheduling.
@@ -115,6 +118,7 @@ flowchart LR
 ### 📊 Live Display
 - **Bracket View** — Visual knockout bracket with round labels and match progression.
 - **Standings Tables** — Round-robin group rankings with points, games won/lost, and tie-break logic.
+- **Round Robin Matrix** — Group-vs-group grid with live score summaries; pending cells are clickable to open scoring in place.
 - **Team Battle Panels** — Team summary cards and duel-by-duel match results.
 - **Responsive Design** — Dedicated mobile/tablet layouts using CSS Grid and Flexbox compression.
 - **Context-Aware Hero Stats** — The hero banner dynamically shows stats relevant to the current view: spectator stats for shared links, owner stats for authenticated users, or a welcome message for bare visitors.
@@ -186,6 +190,7 @@ The app will be available at **http://localhost:5173** with hot module replaceme
 | `npm run build` | TypeScript check + Vite production build → `dist/` |
 | `npm run preview` | Preview production build locally |
 | `npm run lint` | Run ESLint across the codebase |
+| `npx tsx scripts/verify-scenarios.ts` | Deterministic verification of tournament logic (knockout / round-robin / team battle scenarios) |
 
 ---
 
@@ -243,14 +248,18 @@ Tennis-Score-Board/
 │   └── tsconfig.json
 ├── src/                        # Frontend (React + TypeScript)
 │   ├── lib/
-│   │   └── tournament.ts       # Tournament logic engine
-│   ├── App.tsx                 # Main app container
+│   │   └── tournament.ts       # Tournament logic engine (brackets, round-robin plans, standings, scoring)
+│   ├── App.tsx                 # Main app container (UI, live scoring, round-robin entry & matrix)
 │   ├── App.css                 # Component styles
 │   ├── index.css               # Global styles
 │   └── main.tsx                # App entry point
-├── public/                     # Static assets
+├── scripts/
+│   └── verify-scenarios.ts     # Deterministic logic verification (mirrors RR slot-assignment logic)
+├── public/                     # Static assets served at site root
+│   ├── favicon.svg             # Site favicon
+│   └── images/                 # Hero banner background
 ├── amplify.yml                 # CI/CD pipeline definition
-├── amplify_outputs.json        # Generated backend config
+├── amplify_outputs.json        # Generated backend config (gitignored, contains credentials)
 ├── package.json                # Frontend dependencies & scripts
 ├── vite.config.ts              # Vite bundler config
 ├── tsconfig*.json              # TypeScript configurations
