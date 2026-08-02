@@ -1,5 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { Bracket } from 'react-brackets';
+import type { IRoundProps, IRenderSeedProps, ISeedProps } from 'react-brackets';
 import {
   getCurrentUser,
   signIn,
@@ -23,7 +26,9 @@ import {
   evaluateMatchScore,
   formatRoundRobinMatrix,
   getBestOf,
-  shuffleSelectedParticipants,
+  getKnockoutSuccessor,
+  getMatchStatusLabel,
+  isMatchScoreValid,
   type EventType,
   type MatchFormat,
   type ParticipantSeed,
@@ -35,6 +40,8 @@ const client = generateClient<Schema>();
 
 type Player = any;
 type Team = any;
+type TeamMember = any;
+type EventGroup = any;
 type Tournament = any;
 type TournamentEntry = any;
 type Match = any;
@@ -117,15 +124,203 @@ function groupKnockoutRounds(tournamentMatches: Match[]) {
   return Array.from(roundMap.entries()).sort(([left], [right]) => left - right);
 }
 
-function defaultTeamLabel(index: number) {
-  return index < 26 ? `Team ${String.fromCharCode(65 + index)}` : `Team ${index + 1}`;
+// 轮次标题 → 顶部导航短标签：Round of 16 → R16、Quarterfinal → QF 等。
+function shortRoundLabel(title: string): string {
+  const ofMatch = title.match(/round\s+of\s+(\d+)/i);
+  if (ofMatch) {
+    return `R${ofMatch[1]}`;
+  }
+  const lower = title.toLowerCase();
+  if (lower.includes('quarterfinal')) return 'QF';
+  if (lower.includes('semifinal')) return 'SF';
+  if (lower.includes('final')) return 'F';
+  return title;
 }
 
-function normalizeTeamLabels(labels: string[], teamCount: number) {
-  return Array.from({ length: teamCount }, (_, index) => {
-    const provided = labels[index]?.trim();
-    return provided || defaultTeamLabel(index);
-  });
+// 标准单侧树形淘汰赛对阵图（react-brackets 标准化渲染）。
+// 卡片布局由库的 Bracket 核心组件负责；晋级连线由独立的 SVG 层绘制：
+// 通过实测每张卡片的位置，把折线精准锚定在左侧卡片的右侧中点与右侧
+// 卡片的左侧中点之间（连线层 z-index: 0，卡片 z-index: 10），彻底避免
+// 连线与卡片重叠、穿透或断档。卡片内容通过 renderCard 由父级传入（内部
+// 复用现有 renderBracketMatchCard，点击提交比分等业务逻辑原样保留），
+// Match 数据结构不做任何改动。
+function KnockoutBracket({
+  matches,
+  renderCard,
+}: {
+  matches: Match[];
+  renderCard: (match: Match, finalMatch: Match | undefined) => ReactNode;
+}) {
+  const grouped = groupKnockoutRounds(matches);
+  const totalRounds = grouped.length;
+  const finalMatch = totalRounds > 0 ? grouped[totalRounds - 1][1][0] : undefined;
+
+  // 构造库所需的 rounds 数据：每轮一个 IRoundProps，seeds 按 matchNumber
+  // 升序排列（与赛程树形顺序一致），并在每个 seed 上挂载原始 match 与
+  // 决赛引用，供自定义比赛卡片渲染使用。
+  const rounds: IRoundProps[] = grouped.map(([round, roundMatches]) => ({
+    title: roundMatches[0]?.roundLabel ?? `Round ${round}`,
+    seeds: roundMatches.map((match) => ({
+      id: match.id,
+      teams: [
+        { name: match.participantAName || 'TBD' },
+        { name: match.participantBName || 'TBD' },
+      ],
+      match,
+      finalMatch,
+    })),
+  }));
+
+  // 轮次标识（用于连线重测与导航的稳定 key）：各轮次比赛 id 序列。
+  const roundsKey = rounds.map((r) => r.seeds.map((s) => s.id).join(',')).join('|');
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [paths, setPaths] = useState<string[]>([]);
+  const [activeRound, setActiveRound] = useState<number | null>(null);
+
+  // 测量每张卡片的实际位置，生成“左卡右缘中点 → 右卡左缘中点”的
+  // 精准折线。列内卡片通过 flex 均分列高，天然处于两两汇聚的树形中点，
+  // 因此折线的垂直段总是落在两场前驱比赛的正中间。
+  useEffect(() => {
+    const inner = innerRef.current;
+    if (!inner) return;
+    const measure = () => {
+      const containerRect = inner.getBoundingClientRect();
+      const rects = new Map<
+        string,
+        { left: number; right: number; top: number; height: number }
+      >();
+      inner.querySelectorAll<HTMLElement>('.rb-seed').forEach((card) => {
+        const id = card.dataset.matchId;
+        if (!id) return;
+        const r = card.getBoundingClientRect();
+        rects.set(id, {
+          left: r.left - containerRect.left,
+          right: r.right - containerRect.left,
+          top: r.top - containerRect.top,
+          height: r.height,
+        });
+      });
+      const next: string[] = [];
+      rounds.forEach((round, ri) => {
+        if (ri === rounds.length - 1) return; // 最后一轮（决赛）没有后继
+        round.seeds.forEach((seed, si) => {
+          const successor = rounds[ri + 1].seeds[Math.floor(si / 2)];
+          const a = rects.get(String(seed.id));
+          const b = successor ? rects.get(String(successor.id)) : undefined;
+          if (!a || !b) return;
+          const x1 = a.right; // 左卡右缘
+          const y1 = a.top + a.height / 2; // 左卡右侧中点
+          const x2 = b.left; // 右卡左缘
+          const y2 = b.top + b.height / 2; // 右卡左侧中点
+          const xm = (x1 + x2) / 2; // 折线垂直段所在的 x
+          next.push(`M ${x1} ${y1} L ${xm} ${y1} L ${xm} ${y2} L ${x2} ${y2}`);
+        });
+      });
+      setPaths((prev) =>
+        prev.length === next.length && prev.every((p, i) => p === next[i]) ? prev : next,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(inner);
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready.then(measure).catch(() => {});
+    }
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roundsKey]);
+
+  // 点击轮次导航：把对应轮次列平滑滚动到视口最左，其余轮次自然向右延伸。
+  const scrollToRound = (index: number | null) => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) return;
+    if (index === null) {
+      scrollEl.scrollTo({ left: 0, behavior: 'smooth' });
+      setActiveRound(null);
+      return;
+    }
+    const roundEl = scrollEl.querySelectorAll<HTMLElement>('.bracket-round')[index];
+    if (roundEl) {
+      roundEl.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
+    }
+    setActiveRound(index);
+  };
+
+  // 轮次标题：绿色胶囊，与项目既有视觉一致。
+  const renderRoundTitle = (title: string) => (
+    <span className="bracket-col-head">{title}</span>
+  );
+
+  // 自定义比赛卡片（Custom Match Card）：容器负责树形均分定位（flex 均分
+  // 列高，卡片自动处于两两汇聚的树形中点），内部完全复用父级传入的
+  // renderCard —— 点击提交比分等交互逻辑原样保留。
+  const renderMatchSeed = ({ seed }: IRenderSeedProps) => {
+    const match = (seed as ISeedProps & { match: Match }).match;
+    const final = (seed as ISeedProps & { match: Match; finalMatch: Match | undefined })
+      .finalMatch;
+    return (
+      <div className="rb-seed" data-match-id={match.id}>
+        {renderCard(match, final)}
+      </div>
+    );
+  };
+
+  // 顶部轮次导航胶囊：All + 各轮次短标签（R32 / R16 / QF / SF / F）。
+  const navItems = rounds.map((round, index) => ({
+    label: shortRoundLabel(round.title),
+    index,
+  }));
+
+  return (
+    <div className="bracket-wrap">
+      <div className="bracket-nav">
+        <button
+          type="button"
+          className={`bracket-nav-pill ${activeRound === null ? 'active' : ''}`}
+          onClick={() => scrollToRound(null)}
+        >
+          All
+        </button>
+        {navItems.map(({ label, index }) => (
+          <button
+            type="button"
+            key={`${label}-${index}`}
+            className={`bracket-nav-pill ${activeRound === index ? 'active' : ''}`}
+            onClick={() => scrollToRound(index)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="bracket-split" ref={scrollRef}>
+        <div className="bracket-inner" ref={innerRef}>
+          <Bracket
+            rounds={rounds}
+            mobileBreakpoint={0}
+            roundClassName="bracket-round"
+            renderSeedComponent={renderMatchSeed}
+            roundTitleComponent={renderRoundTitle}
+          />
+          <svg className="bracket-connectors" aria-hidden="true">
+            {paths.map((d, index) => (
+              <path key={index} d={d} className="bracket-connector-path" />
+            ))}
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// BYEs are only legal in round 1 of a knockout draw. If a stored match ever
+// carries a BYE in a later round (corrupt/legacy data), the UI must surface
+// and refuse to score it instead of silently rendering an invalid bracket.
+function hasIllegalKnockoutBye(match: Match) {
+  const hasBye =
+    match.score === 'BYE' || match.participantAName === 'BYE' || match.participantBName === 'BYE';
+  return hasBye && match.stage === 'KNOCKOUT' && match.roundNumber > 1;
 }
 
 function getParticipantEntryIds(match: Match, side: WinnerSide) {
@@ -139,6 +334,24 @@ function getParticipantEntryIds(match: Match, side: WinnerSide) {
   }
 
   return singleEntryId ? [singleEntryId] : [];
+}
+
+// Find the round-robin group match wired between two slot entries (either
+// side order). Used by the matrix so a "Score pending" cell can open the
+// exact match in the scoring modal.
+function findGroupMatch<
+  TMatch extends {
+    groupName?: string | null;
+    participantAEntryId?: string | null;
+    participantBEntryId?: string | null;
+  },
+>(matches: TMatch[], groupName: string, entryIdA: string, entryIdB: string) {
+  return matches.find(
+    (item) =>
+      item.groupName === groupName &&
+      ((item.participantAEntryId === entryIdA && item.participantBEntryId === entryIdB) ||
+        (item.participantAEntryId === entryIdB && item.participantBEntryId === entryIdA)),
+  );
 }
 
 function getMatchDisplayScore(match: Match) {
@@ -176,6 +389,8 @@ function groupTeamBattleDuels(tournamentMatches: Match[]) {
 function App() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [eventGroups, setEventGroups] = useState<EventGroup[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [entries, setEntries] = useState<TournamentEntry[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
@@ -201,6 +416,10 @@ function App() {
   const todayStr = new Date().toISOString().slice(0, 10);
   const [selectedDate, setSelectedDate] = useState(todayStr);
   const [showArchived, setShowArchived] = useState(false);
+  // Admin management tab switching: tournaments | players | teams
+  const [adminTab, setAdminTab] = useState<'tournaments' | 'players' | 'teams'>('tournaments');
+  // Visitor view: which Event to display ('all' shows every Event bracket vertically)
+  const [selectedEventId, setSelectedEventId] = useState<string>('all');
 
   const [playerForm, setPlayerForm] = useState({
     name: '',
@@ -208,21 +427,21 @@ function App() {
   });
   const [teamForm, setTeamForm] = useState({
     name: '',
-    playerOneId: '',
-    playerTwoId: '',
+    memberIds: [] as string[],
   });
   const [tournamentForm, setTournamentForm] = useState({
     name: '',
+    eventName: '',
     mode: 'KNOCKOUT' as TournamentMode,
     eventType: 'SINGLES' as EventType,
     matchFormat: 'BEST_OF_3' as MatchFormat,
-    selectedParticipantIds: [] as string[],
     groupCount: 2,
     qualifyPerGroup: 2,
-    customRoundLabels: '',
+    playersPerGroup: 4,
+    knockoutParticipants: 8,
     teamCount: 2,
-    teamSize: 4,
-    teamLabels: ['Team A', 'Team B'],
+    singlesPerDuel: 4,
+    doublesPerDuel: 2,
     eventDate: todayStr,
   });
   const [matchForm, setMatchForm] = useState({
@@ -230,6 +449,25 @@ function App() {
     participantAScores: createEmptyScoreInputs('BEST_OF_3'),
     participantBScores: createEmptyScoreInputs('BEST_OF_3'),
   });
+  // Team battle scoring modal: the match currently being scored in the popup.
+  const [scoringMatch, setScoringMatch] = useState<Match | null>(null);
+  // Round-robin doubles roster modal: the group whose per-slot two-player
+  // lineups are currently being edited in the popup.
+  const [rrRoster, setRrRoster] = useState<{
+    tournamentId: string;
+    groupName: string;
+  } | null>(null);
+  // Inline quick-create state for the bracket editor's "+ Create New" option.
+  // slotIndex is set when a doubles knockout slot (Player 1 / Player 2) was
+  // the source of the request, so the freshly created player replaces exactly
+  // that slot instead of the whole side.
+  const [quickCreate, setQuickCreate] = useState<{
+    matchId: string;
+    side: WinnerSide;
+    kind: 'PLAYER' | 'TEAM';
+    name: string;
+    slotIndex?: number;
+  } | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -244,6 +482,12 @@ function App() {
       }),
       client.models.Team.observeQuery({ authMode }).subscribe({
         next: ({ items }) => setTeams(items.filter(isAmplifyListItem)),
+      }),
+      client.models.TeamMember.observeQuery({ authMode }).subscribe({
+        next: ({ items }) => setTeamMembers(items.filter(isAmplifyListItem)),
+      }),
+      client.models.EventGroup.observeQuery({ authMode }).subscribe({
+        next: ({ items }) => setEventGroups(items.filter(isAmplifyListItem)),
       }),
       client.models.Tournament.observeQuery({ authMode }).subscribe({
         next: ({ items }) => setTournaments(items.filter(isAmplifyListItem)),
@@ -293,101 +537,88 @@ function App() {
     [entries],
   );
 
-  const availableParticipantOptions = useMemo(() => {
-    if (tournamentForm.eventType === 'DOUBLES') {
-      return teams;
-    }
-    return players.filter((player) => player.isActive);
-  }, [players, teams, tournamentForm.eventType]);
+  // Map teamId -> ordered list of member playerIds
+  const teamMemberIdsByTeam = useMemo(() => {
+    const map = new Map<string, string[]>();
+    teamMembers
+      .slice()
+      .sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
+      .forEach((member) => {
+        const list = map.get(member.teamId) ?? [];
+        list.push(member.playerId);
+        map.set(member.teamId, list);
+      });
+    return map;
+  }, [teamMembers]);
 
-  const selectedParticipants = useMemo(
-    () =>
-      tournamentForm.selectedParticipantIds
-        .map((id, index) => {
-          const entity =
-            tournamentForm.eventType === 'DOUBLES' ? teamMap.get(id) : playerMap.get(id);
-          if (!entity) {
-            return null;
-          }
-
-          return {
-            id,
-            name: entity.name,
-            order: index + 1,
-          };
-        })
-        .filter(isAmplifyListItem),
-    [playerMap, teamMap, tournamentForm.eventType, tournamentForm.selectedParticipantIds],
-  );
-
-  const selectedOrderMap = useMemo(
-    () => new Map(selectedParticipants.map((participant) => [participant.id, participant.order])),
-    [selectedParticipants],
-  );
-
-  const teamBattlePreview = useMemo(() => {
-    if (tournamentForm.mode !== 'TEAM_BATTLE' && tournamentForm.eventType !== 'TEAM') {
-      return [];
-    }
-
-    const labels = normalizeTeamLabels(tournamentForm.teamLabels, tournamentForm.teamCount);
-    return labels.map((label, teamIndex) => ({
-      label,
-      members: selectedParticipants.slice(
-        teamIndex * tournamentForm.teamSize,
-        (teamIndex + 1) * tournamentForm.teamSize,
-      ),
-    }));
-  }, [
-    selectedParticipants,
-    tournamentForm.eventType,
-    tournamentForm.mode,
-    tournamentForm.teamCount,
-    tournamentForm.teamLabels,
-    tournamentForm.teamSize,
-  ]);
+  // Resolve a team's member names (for display)
+  function getTeamMemberNames(teamId: string): string[] {
+    const ids = teamMemberIdsByTeam.get(teamId) ?? [];
+    return ids
+      .map((playerId) => playerMap.get(playerId)?.name)
+      .filter((name): name is string => Boolean(name));
+  }
 
   // Active tournaments: non-archived, non-DRAFT, filtered by selected date (owner view)
-  // In spectator mode with sharedTournamentId, only show the specific shared tournament
+  // In spectator mode with sharedTournamentId, only show the specific shared
+  // tournament(s). The shared id may be a single Tournament id or an EventGroup
+  // id (a unified share of multiple Events), so match either field.
   const activeTournaments = useMemo(
     () =>
       [...tournaments]
         .filter((item) => {
           if (item.status === 'DRAFT') return false;
-          if (sharedTournamentId) return item.id === sharedTournamentId;
+          if (sharedTournamentId) {
+            return item.id === sharedTournamentId || item.eventGroupId === sharedTournamentId;
+          }
           return !item.isArchived && item.eventDate === selectedDate;
         })
         .sort((left, right) => left.name.localeCompare(right.name, 'en')),
     [tournaments, selectedDate, sharedTournamentId],
   );
 
+  // Tournament ids owned by the current shared link (single id or whole group).
+  const sharedTournamentIds = useMemo(() => {
+    if (!sharedTournamentId) return new Set<string>();
+    return new Set(
+      tournaments
+        .filter(
+          (item) => item.id === sharedTournamentId || item.eventGroupId === sharedTournamentId,
+        )
+        .map((item) => item.id),
+    );
+  }, [tournaments, sharedTournamentId]);
+
   // Hero stats: context-aware computations
-  // Spectator mode: only count data belonging to the shared tournament
+  // Spectator mode: only count data belonging to the shared tournament(s)
   const spectatorMatchCount = useMemo(
-    () => (sharedTournamentId ? matches.filter((m) => m.tournamentId === sharedTournamentId).length : 0),
-    [matches, sharedTournamentId],
+    () =>
+      sharedTournamentId
+        ? matches.filter((match) => sharedTournamentIds.has(match.tournamentId)).length
+        : 0,
+    [matches, sharedTournamentId, sharedTournamentIds],
   );
   const spectatorPlayerCount = useMemo(() => {
     if (!sharedTournamentId) return 0;
     const sharedEntryIds = new Set(
-      entries.filter((e) => e.tournamentId === sharedTournamentId).map((e) => e.id),
+      entries.filter((entry) => sharedTournamentIds.has(entry.tournamentId)).map((entry) => entry.id),
     );
-    // Count unique players referenced in matches of this tournament
+    // Count unique players referenced in matches of the shared tournament(s)
     const playerIds = new Set<string>();
     matches
-      .filter((m) => m.tournamentId === sharedTournamentId)
-      .forEach((m) => {
-        if (m.participantAEntryId && sharedEntryIds.has(m.participantAEntryId)) {
-          const entry = entries.find((e) => e.id === m.participantAEntryId);
+      .filter((match) => sharedTournamentIds.has(match.tournamentId))
+      .forEach((match) => {
+        if (match.participantAEntryId && sharedEntryIds.has(match.participantAEntryId)) {
+          const entry = entries.find((item) => item.id === match.participantAEntryId);
           if (entry?.playerId) playerIds.add(entry.playerId);
         }
-        if (m.participantBEntryId && sharedEntryIds.has(m.participantBEntryId)) {
-          const entry = entries.find((e) => e.id === m.participantBEntryId);
+        if (match.participantBEntryId && sharedEntryIds.has(match.participantBEntryId)) {
+          const entry = entries.find((item) => item.id === match.participantBEntryId);
           if (entry?.playerId) playerIds.add(entry.playerId);
         }
       });
     return playerIds.size;
-  }, [entries, matches, sharedTournamentId]);
+  }, [entries, matches, sharedTournamentId, sharedTournamentIds]);
   // Owner mode: only count non-archived tournament data
   const ownerActiveTournamentIds = useMemo(
     () => new Set(tournaments.filter((t) => !t.isArchived && t.status !== 'DRAFT').map((t) => t.id)),
@@ -409,16 +640,61 @@ function App() {
     let cancelled = false;
     async function fetchSharedTournament() {
       try {
-        const tournamentResult = await client.models.Tournament.get(
+        // The shared ID may be an EventGroup (unified sharing of multiple Events)
+        // or a single Tournament. Resolve the set of Tournament ids to display.
+        const groupResult = await client.models.EventGroup.get(
           { id: sharedTournamentId } as any,
           { authMode: 'apiKey' },
         );
         if (cancelled) return;
-        if (tournamentResult.data) {
-          setTournaments((current) =>
-            upsertLocalItem(current, tournamentResult.data as Tournament),
+
+        let tournamentIds: string[] = [];
+        if (groupResult.data) {
+          // Shared link points to an EventGroup → load all Events under it.
+          const groupTournaments = tournaments.filter(
+            (t) => t.eventGroupId === sharedTournamentId,
           );
+          tournamentIds = groupTournaments.map((t) => t.id);
+          if (tournamentIds.length === 0) {
+            const listResult = await client.models.Tournament.list({
+              authMode: 'apiKey',
+            });
+            if (cancelled) return;
+            const listedTournaments = (listResult.data ?? [])
+              .filter(isAmplifyListItem)
+              .filter((t) => t.eventGroupId === sharedTournamentId);
+            tournamentIds = listedTournaments.map((t) => t.id);
+            // Upsert the group's Tournament records so the bracket renders even
+            // if observeQuery has not delivered them yet.
+            if (tournamentIds.length > 0) {
+              setTournaments((current) => {
+                const next = [...current];
+                listedTournaments.forEach((t) => {
+                  const idx = next.findIndex((item) => item.id === t.id);
+                  if (idx === -1) next.push(t as Tournament);
+                  else next[idx] = t as Tournament;
+                });
+                return next;
+              });
+            }
+          }
+        } else {
+          // Fall back to treating the ID as a single Tournament.
+          const tournamentResult = await client.models.Tournament.get(
+            { id: sharedTournamentId } as any,
+            { authMode: 'apiKey' },
+          );
+          if (cancelled) return;
+          if (tournamentResult.data) {
+            tournamentIds = [tournamentResult.data.id];
+            setTournaments((current) =>
+              upsertLocalItem(current, tournamentResult.data as Tournament),
+            );
+          }
         }
+
+        if (tournamentIds.length === 0) return;
+
         // Fetch all entries and matches with apiKey, then filter client-side
         const [allEntries, allMatches] = await Promise.all([
           client.models.TournamentEntry.list({ authMode: 'apiKey' }),
@@ -428,7 +704,7 @@ function App() {
         if (allEntries.data) {
           const filteredEntries = allEntries.data
             .filter(isAmplifyListItem)
-            .filter((entry) => entry.tournamentId === sharedTournamentId);
+            .filter((entry) => tournamentIds.includes(entry.tournamentId));
           setEntries((current) => {
             const next = [...current];
             filteredEntries.forEach((entry) => {
@@ -442,7 +718,7 @@ function App() {
         if (allMatches.data) {
           const filteredMatches = allMatches.data
             .filter(isAmplifyListItem)
-            .filter((match) => match.tournamentId === sharedTournamentId);
+            .filter((match) => tournamentIds.includes(match.tournamentId));
           setMatches((current) => {
             const next = [...current];
             filteredMatches.forEach((match) => {
@@ -505,6 +781,23 @@ function App() {
     [activeTournaments, entries, matches],
   );
 
+  // Visitor view overall status: LIVE until every Event's Final is complete (or archived).
+  const displayStatus = useMemo(() => {
+    if (tournamentCards.length === 0) return 'LIVE';
+    const allFinished = tournamentCards.every(({ tournament, matches: cardMatches }) => {
+      if (tournament.isArchived || tournament.status === 'COMPLETED') return true;
+      const finalMatch = getFinalMatch(cardMatches);
+      return finalMatch ? finalMatch.status === 'COMPLETED' : false;
+    });
+    return allFinished ? 'FINISHED' : 'LIVE';
+  }, [tournamentCards]);
+
+  // Visitor view: the Event brackets to render based on the selected filter.
+  const visibleTournamentCards = useMemo(() => {
+    if (selectedEventId === 'all') return tournamentCards;
+    return tournamentCards.filter(({ tournament }) => tournament.id === selectedEventId);
+  }, [tournamentCards, selectedEventId]);
+
   const manageableTournaments = useMemo(
     () =>
       [...tournaments]
@@ -523,6 +816,12 @@ function App() {
     [players],
   );
 
+  const manageableTeams = useMemo(
+    () =>
+      [...teams].sort((left, right) => left.name.localeCompare(right.name, 'en')),
+    [teams],
+  );
+
   const selectedMatch = useMemo(
     () => matches.find((match) => match.id === matchForm.matchId),
     [matchForm.matchId, matches],
@@ -539,19 +838,6 @@ function App() {
   const selectedMatchFormat = (selectedMatch?.matchFormat ||
     selectedMatchTournament?.matchFormat ||
     'BEST_OF_3') as MatchFormat;
-
-  const adminScorableMatches = useMemo(
-    () =>
-      [...matches]
-        .filter((match) => {
-          if (!match.participantAName || !match.participantBName) return false;
-          // Exclude matches belonging to archived tournaments
-          const parentTournament = tournaments.find((t) => t.id === match.tournamentId);
-          return !parentTournament?.isArchived;
-        })
-        .sort((left, right) => left.displayOrder - right.displayOrder),
-    [matches, tournaments],
-  );
 
   function upsertLocalItem<T extends { id: string }>(items: T[], item: T) {
     const index = items.findIndex((current) => current.id === item.id);
@@ -699,7 +985,7 @@ function App() {
       try {
         await autoSignIn();
       } catch (autoSignInError) {
-        console.log('autoSignIn 降级为常规 signIn:', autoSignInError);
+        console.log('autoSignIn fell back to regular signIn:', autoSignInError);
         // Fallback: use the credentials the user just submitted
         await signIn({
           username: signUpForm.email.trim(),
@@ -750,8 +1036,6 @@ function App() {
       ...current,
       eventType: nextEventType,
       mode: nextEventType === 'TEAM' ? 'TEAM_BATTLE' : current.mode === 'TEAM_BATTLE' ? 'KNOCKOUT' : current.mode,
-      teamLabels: normalizeTeamLabels(current.teamLabels, current.teamCount),
-      selectedParticipantIds: [],
     }));
   }
 
@@ -759,42 +1043,6 @@ function App() {
     setTournamentForm((current) => ({
       ...current,
       teamCount,
-      teamLabels: normalizeTeamLabels(current.teamLabels, teamCount),
-      selectedParticipantIds: [],
-    }));
-  }
-
-  function updateTeamLabel(index: number, value: string) {
-    setTournamentForm((current) => {
-      const nextLabels = normalizeTeamLabels(current.teamLabels, current.teamCount);
-      nextLabels[index] = value;
-      return {
-        ...current,
-        teamLabels: nextLabels,
-      };
-    });
-  }
-
-  function toggleParticipantSelection(participantId: string, checked: boolean) {
-    setTournamentForm((current) => ({
-      ...current,
-      selectedParticipantIds: checked
-        ? [...current.selectedParticipantIds, participantId]
-        : current.selectedParticipantIds.filter((id) => id !== participantId),
-    }));
-  }
-
-  function handleRandomDraw() {
-    setTournamentForm((current) => ({
-      ...current,
-      selectedParticipantIds: shuffleSelectedParticipants(current.selectedParticipantIds),
-    }));
-  }
-
-  function unselectParticipant(participantId: string) {
-    setTournamentForm((current) => ({
-      ...current,
-      selectedParticipantIds: current.selectedParticipantIds.filter((id) => id !== participantId),
     }));
   }
 
@@ -831,36 +1079,65 @@ function App() {
       return;
     }
 
-    if (!teamForm.playerOneId || !teamForm.playerTwoId) {
-      setStatusMessage('Please select two different players.');
+    const teamName = teamForm.name.trim();
+    if (!teamName) {
+      setStatusMessage('Please enter a team / club name.');
       return;
     }
 
-    if (teamForm.playerOneId === teamForm.playerTwoId) {
-      setStatusMessage('A doubles team cannot contain the same player twice.');
+    if (teamForm.memberIds.length < 1) {
+      setStatusMessage('Please select at least one team member.');
       return;
     }
-
-    const playerOne = playerMap.get(teamForm.playerOneId);
-    const playerTwo = playerMap.get(teamForm.playerTwoId);
-    const defaultName = [playerOne?.name, playerTwo?.name].filter(Boolean).join(' / ');
 
     setSaving(true);
     setStatusMessage('');
     try {
-      const { data } = await client.models.Team.create(
+      const { data: createdTeam } = await client.models.Team.create(
         {
-          name: teamForm.name.trim() || defaultName,
-          playerOneId: teamForm.playerOneId,
-          playerTwoId: teamForm.playerTwoId,
+          name: teamName,
         } as any,
         ownerAuthMode(),
       );
-      if (data) {
-        setTeams((current) => upsertLocalItem(current, data as Team));
+
+      if (!createdTeam) {
+        throw new Error('Team creation failed.');
       }
-      setTeamForm({ name: '', playerOneId: '', playerTwoId: '' });
-      setStatusMessage('Doubles team created successfully.');
+      setTeams((current) => upsertLocalItem(current, createdTeam as Team));
+
+      // Create TeamMember records for each selected member
+      const createdMembers: TeamMember[] = [];
+      for (let index = 0; index < teamForm.memberIds.length; index += 1) {
+        const playerId = teamForm.memberIds[index];
+        const { data: member } = await client.models.TeamMember.create(
+          {
+            teamId: createdTeam.id,
+            playerId,
+            order: index + 1,
+          } as any,
+          ownerAuthMode(),
+        );
+        if (member) {
+          createdMembers.push(member as TeamMember);
+        }
+      }
+      if (createdMembers.length) {
+        setTeamMembers((current) => {
+          const next = [...current];
+          createdMembers.forEach((member) => {
+            const idx = next.findIndex((m) => m.id === member.id);
+            if (idx === -1) next.push(member);
+            else next[idx] = member;
+          });
+          return next;
+        });
+      }
+
+      setTeamForm({ name: '', memberIds: [] });
+      setStatusMessage(`Team "${createdTeam.name}" created successfully.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create the team.';
+      setStatusMessage(message);
     } finally {
       setSaving(false);
     }
@@ -880,80 +1157,68 @@ function App() {
       return;
     }
 
-    if (effectiveMode === 'TEAM_BATTLE') {
-      if (tournamentForm.teamSize < 2 || tournamentForm.teamSize % 2 !== 0) {
-        setStatusMessage('Team size must be an even number and at least 2.');
-        return;
-      }
-      if (
-        tournamentForm.selectedParticipantIds.length !==
-        tournamentForm.teamCount * tournamentForm.teamSize
-      ) {
-        setStatusMessage('Please select exactly teamCount x teamSize players for team battle.');
-        return;
-      }
-    } else if (tournamentForm.selectedParticipantIds.length < 2) {
-      setStatusMessage('Please select at least 2 participants.');
+    // Knockout draws require the admin-defined participant count. The count
+    // drives the first-round pairings and the automatic BYE placement.
+    if (
+      effectiveMode === 'KNOCKOUT' &&
+      (!Number.isFinite(tournamentForm.knockoutParticipants) ||
+        tournamentForm.knockoutParticipants < 2)
+    ) {
+      setStatusMessage('Please enter at least 2 participants for the knockout draw.');
       return;
     }
 
-    const participantSeeds: ParticipantSeed[] = tournamentForm.selectedParticipantIds
-      .map((id, index) => {
-        if (tournamentForm.eventType === 'DOUBLES') {
-          const team = teamMap.get(id);
-          if (!team) {
-            return null;
-          }
-          return {
-            sourceId: team.id,
-            displayName: team.name,
-            participantType: 'TEAM' as const,
-            teamId: team.id,
-            selectionOrder: index + 1,
-          };
-        }
-
-        const player = playerMap.get(id);
-        if (!player) {
-          return null;
-        }
-        return {
-          sourceId: player.id,
-          displayName: player.name,
-          participantType: 'PLAYER' as const,
-          playerId: player.id,
-          selectionOrder: index + 1,
-        };
-      })
-      .filter(isAmplifyListItem);
-
-    if (participantSeeds.length !== tournamentForm.selectedParticipantIds.length) {
-      setStatusMessage('Some selected participants could not be resolved. Please reselect them.');
-      return;
-    }
-
-    const customRoundLabels = tournamentForm.customRoundLabels
-      .split(',')
-      .map((label) => label.trim())
-      .filter(Boolean);
+    // Team battle: teams are assigned from the system Team list directly on the
+    // tournament display. The schedule is generated with default team slots and
+    // TBD player placeholders; concrete rosters are synced per-team when an
+    // admin picks a system team for each side of a duel.
+    const teamCount = tournamentForm.teamCount;
+    const singlesPerDuel = tournamentForm.singlesPerDuel;
+    const doublesPerDuel = tournamentForm.doublesPerDuel;
+    const knockoutParticipants = tournamentForm.knockoutParticipants;
+    // Singles / Doubles: start with an empty bracket (TBD placeholders) and let
+    // the admin assign participants directly on the tournament display.
+    const participantSeeds: ParticipantSeed[] = [];
 
     setSaving(true);
     setStatusMessage('');
 
     try {
+      // Find-or-create an EventGroup (the shared Tournament group) by name + date.
+      // Multiple Events (Tournaments) can hang under the same EventGroup for unified sharing.
+      const existingGroup = eventGroups.find(
+        (group) => group.name === tournamentForm.name.trim() && group.eventDate === tournamentForm.eventDate,
+      );
+      let eventGroupId: string | undefined = existingGroup?.id;
+
+      if (!eventGroupId) {
+        const { data: createdGroup } = await client.models.EventGroup.create(
+          {
+            name: tournamentForm.name.trim(),
+            eventDate: tournamentForm.eventDate,
+            isArchived: false,
+          } as any,
+          ownerAuthMode(),
+        );
+        if (createdGroup) {
+          eventGroupId = createdGroup.id;
+          setEventGroups((current) => upsertLocalItem(current, createdGroup as EventGroup));
+        }
+      }
+
       const plan =
         effectiveMode === 'TEAM_BATTLE'
           ? buildTeamBattlePlan(
               participantSeeds,
-              tournamentForm.teamCount,
-              tournamentForm.teamSize,
-              normalizeTeamLabels(tournamentForm.teamLabels, tournamentForm.teamCount),
+              teamCount,
+              singlesPerDuel,
+              doublesPerDuel,
               tournamentForm.matchFormat,
             )
           : effectiveMode === 'KNOCKOUT'
             ? buildKnockoutPlan(
-                participantSeeds,
-                customRoundLabels,
+                knockoutParticipants,
+                [],
                 tournamentForm.matchFormat,
                 tournamentForm.eventType,
               )
@@ -962,10 +1227,13 @@ function App() {
                 tournamentForm.groupCount,
                 tournamentForm.matchFormat,
                 tournamentForm.eventType,
+                tournamentForm.playersPerGroup,
               );
 
       const tournamentPayload: any = {
         name: tournamentForm.name.trim(),
+        eventName: tournamentForm.eventName.trim() || undefined,
+        eventGroupId,
         mode: effectiveMode,
         eventType: tournamentForm.eventType === 'TEAM' ? 'TEAM' : tournamentForm.eventType,
         status: 'LIVE',
@@ -974,14 +1242,11 @@ function App() {
         groupCount: effectiveMode === 'ROUND_ROBIN' ? tournamentForm.groupCount : undefined,
         qualifyPerGroup:
           effectiveMode === 'ROUND_ROBIN' ? tournamentForm.qualifyPerGroup : undefined,
+        playersPerGroup:
+          effectiveMode === 'ROUND_ROBIN' ? tournamentForm.playersPerGroup : undefined,
         bracketSize: effectiveMode === 'KNOCKOUT' ? (plan as any).bracketSize : undefined,
         roundLabels: effectiveMode === 'KNOCKOUT' ? (plan as any).roundLabels : undefined,
-        teamCount: effectiveMode === 'TEAM_BATTLE' ? tournamentForm.teamCount : undefined,
-        teamSize: effectiveMode === 'TEAM_BATTLE' ? tournamentForm.teamSize : undefined,
-        teamLabels:
-          effectiveMode === 'TEAM_BATTLE'
-            ? normalizeTeamLabels(tournamentForm.teamLabels, tournamentForm.teamCount)
-            : undefined,
+        teamCount: effectiveMode === 'TEAM_BATTLE' ? teamCount : undefined,
         startedAt: new Date().toISOString(),
       };
 
@@ -1074,16 +1339,17 @@ function App() {
 
       setTournamentForm({
         name: '',
+        eventName: '',
         mode: 'KNOCKOUT',
         eventType: 'SINGLES',
         matchFormat: 'BEST_OF_3',
-        selectedParticipantIds: [],
         groupCount: 2,
         qualifyPerGroup: 2,
-        customRoundLabels: '',
+        playersPerGroup: 4,
+        knockoutParticipants: 8,
         teamCount: 2,
-        teamSize: 4,
-        teamLabels: ['Team A', 'Team B'],
+        singlesPerDuel: 4,
+        doublesPerDuel: 2,
         eventDate: todayStr,
       });
       setStatusMessage(`Tournament "${createdTournament.name}" was created successfully.`);
@@ -1103,17 +1369,6 @@ function App() {
       }
     });
     return inputs;
-  }
-
-  function handleMatchSelection(matchId: string) {
-    const match = matches.find((item) => item.id === matchId);
-    const matchFormat = (match?.matchFormat || 'BEST_OF_3') as MatchFormat;
-
-    setMatchForm({
-      matchId,
-      participantAScores: hydrateScoreInputs(match?.participantAScores, matchFormat),
-      participantBScores: hydrateScoreInputs(match?.participantBScores, matchFormat),
-    });
   }
 
   function mergeMatchState(
@@ -1170,12 +1425,14 @@ function App() {
       return localMatches;
     }
 
+    const { roundNumber: nextRoundNumber, matchNumber: nextMatchNumber } =
+      getKnockoutSuccessor(currentMatch);
     const nextMatch = localMatches.find(
       (match) =>
         match.tournamentId === currentMatch.tournamentId &&
         match.stage === 'KNOCKOUT' &&
-        match.roundNumber === currentMatch.roundNumber + 1 &&
-        match.matchNumber === Math.ceil(currentMatch.matchNumber / 2),
+        match.roundNumber === nextRoundNumber &&
+        match.matchNumber === nextMatchNumber,
     );
 
     if (!nextMatch) {
@@ -1218,101 +1475,23 @@ function App() {
     return cascadeKnockoutUpdate(nextMatch.id, {}, nextLocalMatches);
   }
 
-  async function recordMatch(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!isAuthenticated || !selectedMatch) {
-      return;
-    }
-
-    const evaluated = evaluateMatchScore(
-      matchForm.participantAScores,
-      matchForm.participantBScores,
-      selectedMatchFormat,
-    );
-
-    if (!evaluated) {
-      setStatusMessage('Please enter a valid score line based on the selected match format.');
-      return;
-    }
-
-    const winnerEntryId =
-      evaluated.winner === 'A'
-        ? selectedMatch.participantAEntryId ?? null
-        : selectedMatch.participantBEntryId ?? null;
-    const winnerEntryIds = getParticipantEntryIds(selectedMatch, evaluated.winner);
-    const winnerName =
-      evaluated.winner === 'A'
-        ? selectedMatch.participantAName
-        : selectedMatch.participantBName;
-    const updatePayload: any = {
-      id: selectedMatch.id,
-      participantAScores: evaluated.participantAScores,
-      participantBScores: evaluated.participantBScores,
-      winnerEntryId,
-      winnerSide: evaluated.winner,
-      score: evaluated.summary,
-      status: 'COMPLETED',
-      completedAt: new Date().toISOString(),
-    };
-
-    setSaving(true);
-    setStatusMessage('');
-
-    try {
-      const { data } = await client.models.Match.update(
-        updatePayload as any,
-        ownerAuthMode(),
-      );
-      let nextMatches = mergeMatchState(
-        matches,
-        selectedMatch.id,
-        updatePayload,
-        data as Match | null,
-      );
-      setMatches(nextMatches);
-
-      if (selectedMatch.stage === 'KNOCKOUT') {
-        nextMatches = await cascadeKnockoutUpdate(
-          selectedMatch.id,
-          {
-          winnerEntryIds,
-          winnerName,
-          },
-          nextMatches,
-        );
-        setMatches(nextMatches);
-      }
-
-      await syncTournamentStatus(selectedMatch.tournamentId, nextMatches);
-
-      setMatchForm({
-        matchId: selectedMatch.id,
-        participantAScores: hydrateScoreInputs(evaluated.participantAScores, selectedMatchFormat),
-        participantBScores: hydrateScoreInputs(evaluated.participantBScores, selectedMatchFormat),
-      });
-      setStatusMessage('Match score saved successfully.');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save the match score.';
-      setStatusMessage(message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function clearMatchScore() {
-    if (!isAuthenticated || !selectedMatch) {
+  async function clearMatchScore(matchId?: string) {
+    const targetMatch = matchId
+      ? matches.find((match) => match.id === matchId)
+      : selectedMatch;
+    if (!isAuthenticated || !targetMatch) {
       return;
     }
 
     const updatePayload: any = {
-      id: selectedMatch.id,
+      id: targetMatch.id,
       participantAScores: null,
       participantBScores: null,
       winnerEntryId: null,
       winnerSide: null,
       score: null,
       status:
-        selectedMatch.participantAName && selectedMatch.participantBName
+        targetMatch.participantAName && targetMatch.participantBName
           ? 'IN_PROGRESS'
           : 'PENDING',
       completedAt: null,
@@ -1328,20 +1507,20 @@ function App() {
       );
       let nextMatches = mergeMatchState(
         matches,
-        selectedMatch.id,
+        targetMatch.id,
         updatePayload,
         data as Match | null,
       );
       setMatches(nextMatches);
 
-      if (selectedMatch.stage === 'KNOCKOUT') {
-        nextMatches = await cascadeKnockoutUpdate(selectedMatch.id, {}, nextMatches);
+      if (targetMatch.stage === 'KNOCKOUT') {
+        nextMatches = await cascadeKnockoutUpdate(targetMatch.id, {}, nextMatches);
         setMatches(nextMatches);
       }
 
-      await syncTournamentStatus(selectedMatch.tournamentId, nextMatches);
+      await syncTournamentStatus(targetMatch.tournamentId, nextMatches);
       setMatchForm({
-        matchId: selectedMatch.id,
+        matchId: targetMatch.id,
         participantAScores: createEmptyScoreInputs(selectedMatchFormat),
         participantBScores: createEmptyScoreInputs(selectedMatchFormat),
       });
@@ -1358,6 +1537,9 @@ function App() {
     if (!isAuthenticated) {
       return;
     }
+
+    const targetTournament = tournaments.find((t) => t.id === tournamentId);
+    const eventGroupId = targetTournament?.eventGroupId;
 
     const shouldResetSelectedMatch = matches.some(
       (match) => match.id === matchForm.matchId && match.tournamentId === tournamentId,
@@ -1391,6 +1573,22 @@ function App() {
         current.filter((entry) => entry.tournamentId !== tournamentId),
       );
       setTournaments((current) => removeLocalItem(current, tournamentId));
+
+      // If this was the last Event under its EventGroup, clean up the orphaned group
+      // so it no longer appears in the historical name dropdown / share links.
+      if (eventGroupId) {
+        const remainingEvents = tournaments.filter(
+          (t) => t.eventGroupId === eventGroupId && t.id !== tournamentId,
+        );
+        if (remainingEvents.length === 0) {
+          await client.models.EventGroup.delete(
+            { id: eventGroupId } as any,
+            ownerAuthMode(),
+          );
+          setEventGroups((current) => removeLocalItem(current, eventGroupId));
+        }
+      }
+
       if (shouldResetSelectedMatch) {
         setMatchForm({
           matchId: '',
@@ -1398,7 +1596,7 @@ function App() {
           participantBScores: createEmptyScoreInputs('BEST_OF_3'),
         });
       }
-      setStatusMessage('Tournament deleted.');
+      setStatusMessage('Event deleted.');
     } finally {
       setSaving(false);
     }
@@ -1439,9 +1637,10 @@ function App() {
     }
 
     const player = players.find((item) => item.id === playerId);
-    const linkedTeams = teams.filter(
-      (team) => team.playerOneId === playerId || team.playerTwoId === playerId,
-    );
+    const linkedMemberships = teamMembers.filter((member) => member.playerId === playerId);
+    const linkedTeams = linkedMemberships
+      .map((member) => teamMap.get(member.teamId))
+      .filter(isAmplifyListItem);
     const linkedEntries = entries.filter((entry) => entry.playerId === playerId);
 
     if (linkedTeams.length || linkedEntries.length) {
@@ -1468,12 +1667,7 @@ function App() {
         );
         setTeamForm((current) => ({
           ...current,
-          playerOneId: current.playerOneId === playerId ? '' : current.playerOneId,
-          playerTwoId: current.playerTwoId === playerId ? '' : current.playerTwoId,
-        }));
-        setTournamentForm((current) => ({
-          ...current,
-          selectedParticipantIds: current.selectedParticipantIds.filter((id) => id !== playerId),
+          memberIds: current.memberIds.filter((id) => id !== playerId),
         }));
         setStatusMessage(
           `Player "${player?.name ?? 'Unknown'}" is already used in a team or tournament, so it was archived and removed from active lists instead of being hard-deleted.`,
@@ -1495,12 +1689,7 @@ function App() {
       setPlayers((current) => removeLocalItem(current, playerId));
       setTeamForm((current) => ({
         ...current,
-        playerOneId: current.playerOneId === playerId ? '' : current.playerOneId,
-        playerTwoId: current.playerTwoId === playerId ? '' : current.playerTwoId,
-      }));
-      setTournamentForm((current) => ({
-        ...current,
-        selectedParticipantIds: current.selectedParticipantIds.filter((id) => id !== playerId),
+        memberIds: current.memberIds.filter((id) => id !== playerId),
       }));
       setStatusMessage(`Player "${player?.name ?? 'Unknown'}" deleted successfully.`);
     } catch (error) {
@@ -1518,13 +1707,6 @@ function App() {
 
     const team = teams.find((item) => item.id === teamId);
     const linkedEntries = entries.filter((entry) => entry.teamId === teamId);
-    const isSelected = tournamentForm.selectedParticipantIds.includes(teamId);
-
-    if (isSelected) {
-      unselectParticipant(teamId);
-      setStatusMessage(`Team "${team?.name ?? 'Unknown'}" removed from the current selection.`);
-      return;
-    }
 
     // Only consider entries that belong to tournaments that still exist.
     // Entries from deleted tournaments may linger in local state due to
@@ -1543,8 +1725,14 @@ function App() {
     setSaving(true);
     setStatusMessage('');
     try {
+      // Cascade delete all TeamMember records belonging to this team.
+      const teamMembersToDelete = teamMembers.filter((member) => member.teamId === teamId);
+      for (const member of teamMembersToDelete) {
+        await client.models.TeamMember.delete({ id: member.id } as any, ownerAuthMode());
+      }
       await client.models.Team.delete({ id: teamId } as any, ownerAuthMode());
       setTeams((current) => removeLocalItem(current, teamId));
+      setTeamMembers((current) => current.filter((member) => member.teamId !== teamId));
       setStatusMessage(`Team "${team?.name ?? 'Unknown'}" deleted successfully.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to delete team.';
@@ -1632,6 +1820,162 @@ function App() {
     }
   }
 
+  // Assign a system-created team to a Team Battle side. The team slot is
+  // renamed across the whole tournament (labels + entry pool), so every
+  // singles/doubles submatch of that team immediately uses the same roster.
+  async function selectTeamBattleTeam(match: Match, side: WinnerSide, team: Team) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const isA = side === 'A';
+    const oldLabel = isA ? match.participantATeamLabel : match.participantBTeamLabel;
+    const newLabel = team.name;
+    const tournamentId = match.tournamentId;
+
+    // Guard: the selected team must not already be bound to another slot of
+    // this tournament (global mutual exclusion across all duels).
+    const currentSlotLabel = isA ? match.participantATeamLabel : match.participantBTeamLabel;
+    const otherSlotLabels = new Set(
+      matches
+        .filter((item) => item.tournamentId === tournamentId)
+        .flatMap((item) => [item.participantATeamLabel, item.participantBTeamLabel])
+        .filter((label): label is string => Boolean(label) && label !== currentSlotLabel),
+    );
+    if (otherSlotLabels.has(newLabel)) {
+      setStatusMessage(
+        `Team "${newLabel}" is already assigned to another slot in this tournament.`,
+      );
+      return;
+    }
+
+    const memberPlayers = (teamMemberIdsByTeam.get(team.id) ?? [])
+      .map((playerId) => playerMap.get(playerId))
+      .filter(isAmplifyListItem);
+    const labelChanged = Boolean(oldLabel) && oldLabel !== newLabel;
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      // 1) Rename this team slot across the whole tournament (entries + matches).
+      let workingEntries: TournamentEntry[] = entries;
+      if (labelChanged) {
+        const slotEntryIds = new Set(
+          entries
+            .filter((entry) => entry.tournamentId === tournamentId && entry.groupName === oldLabel)
+            .map((entry) => entry.id),
+        );
+        for (const entryId of slotEntryIds) {
+          const payload = { id: entryId, groupName: newLabel };
+          const { data } = await client.models.TournamentEntry.update(
+            payload as any,
+            ownerAuthMode(),
+          );
+          if (data) {
+            setEntries((current) => upsertLocalItem(current, data as TournamentEntry));
+          }
+        }
+        workingEntries = entries.map((entry) =>
+          slotEntryIds.has(entry.id)
+            ? ({ ...entry, groupName: newLabel } as TournamentEntry)
+            : entry,
+        );
+
+        const slotMatches = matches.filter(
+          (item) =>
+            item.tournamentId === tournamentId &&
+            (item.participantATeamLabel === oldLabel || item.participantBTeamLabel === oldLabel),
+        );
+        for (const item of slotMatches) {
+          const payload: any = {
+            id: item.id,
+            participantATeamLabel:
+              item.participantATeamLabel === oldLabel ? newLabel : item.participantATeamLabel,
+            participantBTeamLabel:
+              item.participantBTeamLabel === oldLabel ? newLabel : item.participantBTeamLabel,
+          };
+          const { data } = await client.models.Match.update(payload as any, ownerAuthMode());
+          if (data) {
+            setMatches((current) =>
+              mergeMatchState(current, item.id, payload, data as Match | null),
+            );
+          }
+        }
+      }
+
+      // 2) Sync the team's player pool into this tournament's entry records.
+      const targetEntries = workingEntries
+        .filter((entry) => entry.tournamentId === tournamentId && entry.groupName === newLabel)
+        .sort(
+          (left, right) =>
+            (left.teamOrder ?? left.slotNumber ?? 0) - (right.teamOrder ?? right.slotNumber ?? 0),
+        );
+      for (let index = 0; index < memberPlayers.length; index += 1) {
+        const member = memberPlayers[index];
+        const entry = targetEntries[index];
+        if (entry) {
+          if (entry.playerId !== member.id || entry.entryName !== member.name) {
+            const payload = { id: entry.id, playerId: member.id, entryName: member.name };
+            const { data } = await client.models.TournamentEntry.update(
+              payload as any,
+              ownerAuthMode(),
+            );
+            if (data) {
+              setEntries((current) => upsertLocalItem(current, data as TournamentEntry));
+            }
+          }
+        } else {
+          const { data: createdEntry } = await client.models.TournamentEntry.create(
+            {
+              tournamentId,
+              participantType: 'PLAYER',
+              playerId: member.id,
+              entryName: member.name,
+              seed: 0,
+              groupName: newLabel,
+              slotNumber: index + 1,
+              isBye: false,
+              teamOrder: index + 1,
+            } as any,
+            ownerAuthMode(),
+          );
+          if (createdEntry) {
+            setEntries((current) => upsertLocalItem(current, createdEntry as TournamentEntry));
+          }
+        }
+      }
+
+      // 3) Reset this side's lineup so the admin assigns specific players per submatch.
+      if (labelChanged) {
+        const sidePayload: any = isA
+          ? {
+              id: match.id,
+              participantAEntryId: null,
+              participantAEntryIds: null,
+              participantAName: null,
+            }
+          : {
+              id: match.id,
+              participantBEntryId: null,
+              participantBEntryIds: null,
+              participantBName: null,
+            };
+        const { data } = await client.models.Match.update(sidePayload as any, ownerAuthMode());
+        if (data) {
+          setMatches((current) => mergeMatchState(current, match.id, sidePayload, data as Match | null));
+        }
+      }
+
+      setStatusMessage(
+        `Team "${newLabel}" assigned to side ${side}. Now select the players for each submatch.`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to assign the team.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function renderParticipantRow(
     match: Match,
     side: WinnerSide,
@@ -1664,7 +2008,9 @@ function App() {
               </span>
             ))
           ) : (
-            <span className="set-score-placeholder">{match.score === 'BYE' ? 'BYE' : '—'}</span>
+            // A BYE match has no sets to show — the single "BYE" marker lives
+            // in the bye side's participant name, never in the score strip.
+            <span className="set-score-placeholder">—</span>
           )}
         </div>
       </div>
@@ -1717,7 +2063,7 @@ function App() {
             <span className="team-submatch-format">{getMatchFormatLabel(match.matchFormat)}</span>
             <strong className="team-submatch-score">{getMatchDisplayScore(match)}</strong>
             <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
-              {match.status === 'COMPLETED' ? 'Completed' : match.status === 'IN_PROGRESS' ? 'In Progress' : 'Pending'}
+              {getMatchStatusLabel(match.status)}
             </span>
           </div>
           {renderTeamBattleSide(match, 'B')}
@@ -1767,55 +2113,1341 @@ function App() {
     );
   }
 
-  function renderTeamBattleLineupEditor(match: Match) {
-    if (match.stage !== 'TEAM_BATTLE') {
+  // Open the Team Battle scoring modal for a match row. The popup supports
+  // selecting the on-court players for both sides and entering the score, with
+  // Save Score / Confirm Match End / Clear actions.
+  function openScoringModal(match: Match) {
+    const matchFormat = (match.matchFormat || 'BEST_OF_3') as MatchFormat;
+    setMatchForm({
+      matchId: match.id,
+      participantAScores: hydrateScoreInputs(match.participantAScores ?? [], matchFormat),
+      participantBScores: hydrateScoreInputs(match.participantBScores ?? [], matchFormat),
+    });
+    setScoringMatch(match);
+  }
+
+  // Dedicated scoring popup for a Team Battle submatch row. It renders the two
+  // team headers, per-side player lineups (singles: 1, doubles: 2), the score
+  // inputs, and the Save Score / Confirm Match End / Clear action buttons.
+  function renderTeamBattleScoringModal() {
+    const match = scoringMatch
+      ? matches.find((item) => item.id === scoringMatch.id) ?? scoringMatch
+      : null;
+    if (!match || match.stage !== 'TEAM_BATTLE') {
       return null;
     }
 
+    const matchFormat = (match.matchFormat || 'BEST_OF_3') as MatchFormat;
+    const setCount = getBestOf(matchFormat);
     const slotCount = match.matchCategory === 'TEAM_DOUBLES' ? 2 : 1;
+    const isConfirmed = match.status === 'COMPLETED';
+    const isEditingThisMatch = matchForm.matchId === match.id;
+    const aScores = isEditingThisMatch
+      ? matchForm.participantAScores
+      : (match.participantAScores ?? []).map(String);
+    const bScores = isEditingThisMatch
+      ? matchForm.participantBScores
+      : (match.participantBScores ?? []).map(String);
+    const scoreIsValid = isMatchScoreValid(aScores, bScores, matchFormat);
 
     return (
-      <div className="team-lineup-editor">
-        <div className="team-lineup-editor-head">
-          <strong>Adjust lineup before scoring</strong>
-          <span>
-            {match.status === 'COMPLETED'
-              ? 'Clear the score first to change this completed lineup.'
-              : 'Selections update the match card immediately.'}
-          </span>
-        </div>
-        <div className="team-lineup-grid">
-          {(['A', 'B'] as WinnerSide[]).map((side) => (
-            <div className="team-lineup-side" key={`${match.id}-${side}`}>
-              <strong>
-                {side === 'A' ? match.participantATeamLabel || 'Team A' : match.participantBTeamLabel || 'Team B'}
-              </strong>
-              <div className="team-lineup-selects">
-                {Array.from({ length: slotCount }, (_, index) =>
-                  renderTeamBattleLineupSelect(match, side, index),
-                )}
-              </div>
+      <div className="scoring-modal-overlay" onClick={() => setScoringMatch(null)}>
+        <div className="scoring-modal" onClick={(event) => event.stopPropagation()}>
+          <div className="scoring-modal-head">
+            <div className="scoring-modal-title">
+              <strong>Match Scoring</strong>
+              <span className="scoring-modal-type">
+                {match.matchCategory === 'TEAM_DOUBLES' ? 'Doubles' : 'Singles'}
+              </span>
             </div>
-          ))}
+            <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
+              {getMatchStatusLabel(match.status)}
+            </span>
+            <button
+              className="scoring-modal-close"
+              type="button"
+              aria-label="Close scoring dialog"
+              onClick={() => setScoringMatch(null)}
+            >
+              ×
+            </button>
+          </div>
+
+          <div className="scoring-modal-sides">
+            {(['A', 'B'] as WinnerSide[]).map((side) => {
+              const isA = side === 'A';
+              const scores = isA ? aScores : bScores;
+              return (
+                <div className="scoring-side" key={side}>
+                  <div className="scoring-side-head">
+                    <strong>
+                      {isA
+                        ? match.participantATeamLabel || 'Team A'
+                        : match.participantBTeamLabel || 'Team B'}
+                    </strong>
+                  </div>
+                  <div className="scoring-side-lineup">
+                    {Array.from({ length: slotCount }, (_, index) =>
+                      renderTeamBattleLineupSelect(match, side, index),
+                    )}
+                  </div>
+                  <div className="editable-score-inputs">
+                    {Array.from({ length: setCount }, (_, index) => (
+                      <input
+                        key={`${match.id}-${side}-${index}`}
+                        className="inline-score-input"
+                        type="number"
+                        min={0}
+                        value={scores[index] ?? ''}
+                        disabled={saving || isConfirmed}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          const key = isA ? 'participantAScores' : 'participantBScores';
+                          const next = [...scores];
+                          next[index] = value;
+                          setMatchForm((current) => ({
+                            ...current,
+                            matchId: match.id,
+                            [key]: next,
+                          }));
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="scoring-modal-actions">
+            {isConfirmed ? (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={saving}
+                onClick={() => void unlockMatch(match)}
+                title="Reopen the match to correct participants or the score"
+              >
+                🔓 Unlock
+              </button>
+            ) : (
+              <>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void saveInlineScore(match, aScores, bScores)}
+                >
+                  Save Score
+                </button>
+                <button
+                  className="confirm-button"
+                  type="button"
+                  disabled={saving || !scoreIsValid}
+                  onClick={() => void confirmMatchEnd(match, aScores, bScores)}
+                  title="Finalize the match and lock the score"
+                >
+                  ✓ Confirm Match End
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void clearMatchScore(match.id)}
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
-  async function handleParticipantChipRemove(participantId: string) {
-    const isSelected = tournamentForm.selectedParticipantIds.includes(participantId);
-    if (isSelected) {
-      unselectParticipant(participantId);
-      setStatusMessage('Selection updated.');
+  // Participant dropdown inside the standard scoring modal. Singles offers
+  // players, doubles offers teams. The select is bound to the current side so
+  // the chosen participant is re-selectable at any time; the trailing TBD
+  // option clears the side back to an undecided participant.
+  function renderStandardModalParticipantSelect(match: Match, side: WinnerSide) {
+    const isA = side === 'A';
+    const currentName = isA ? match.participantAName : match.participantBName;
+    const isDoubles = match.matchCategory === 'STANDARD_DOUBLES';
+    const options = isDoubles
+      ? manageableTeams.map((team) => ({ value: team.id, label: team.name }))
+      : manageablePlayers.map((player) => ({ value: player.id, label: player.name }));
+    const createKind: 'PLAYER' | 'TEAM' = isDoubles ? 'TEAM' : 'PLAYER';
+    const currentValue = options.find((option) => option.label === currentName)?.value ?? '';
+
+    return (
+      <label className="team-lineup-select">
+        <span>{isDoubles ? 'Doubles team' : 'Player'}</span>
+        <select
+          className="inline-participant-select"
+          value={currentValue}
+          disabled={saving || match.status === 'COMPLETED'}
+          onChange={(event) => {
+            const value = event.target.value;
+            if (value === '__create__') {
+              setQuickCreate({ matchId: match.id, side, kind: createKind, name: '' });
+              return;
+            }
+            if (value === '__tbd__') {
+              void updateMatchParticipant(match, side, [], 'TBD');
+              return;
+            }
+            if (!value) {
+              return;
+            }
+            const option = options.find((opt) => opt.value === value);
+            void updateMatchParticipant(match, side, [value], option?.label ?? 'TBD');
+          }}
+        >
+          {!currentValue ? <option value="">{currentName || 'Select participant'}</option> : null}
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+          <option value="__tbd__">TBD</option>
+          <option value="__create__">
+            + Create New {createKind === 'TEAM' ? 'Team' : 'Player'}
+          </option>
+        </select>
+      </label>
+    );
+  }
+
+  // Doubles knockout sides bind two INDEPENDENT players, so this renderer
+  // produces one dropdown per player slot instead of a whole-team select. The
+  // dropdowns mirror the singles participant select exactly: same
+  // inline-participant-select styling, freely re-selectable, and a TBD option
+  // at the end of the player list clears that slot.
+  function renderDoublesModalParticipantSelects(match: Match, side: WinnerSide) {
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+    // A freshly generated knockout match pre-fills each side with the bracket
+    // slot's TournamentEntry id (not a Player id); only ids that resolve to a
+    // real selectable player may occupy a dropdown slot.
+    const validSlotIds = getParticipantEntryIds(match, side).filter((id) =>
+      playerIdToName.has(id),
+    );
+    const slotIds: (string | undefined)[] = [validSlotIds[0], validSlotIds[1]];
+
+    const commitSlot = (slotIndex: number, nextId: string | null) => {
+      const next = [...validSlotIds];
+      if (nextId) {
+        next[slotIndex] = nextId;
+      } else {
+        next.splice(slotIndex, 1);
+      }
+      const ids = next.filter(Boolean);
+      const name = ids.length
+        ? ids.map((id) => playerIdToName.get(id) ?? 'TBD').join(' / ')
+        : 'TBD';
+      void updateMatchParticipant(match, side, ids, name);
+    };
+
+    return (
+      <div className="doubles-lineup-select">
+        {[0, 1].map((slotIndex) => {
+          const slotId = slotIds[slotIndex] ?? '';
+          return (
+            <label
+              className="team-lineup-select"
+              key={`${match.id}-${side}-slot-${slotIndex}`}
+            >
+              <span>Player {slotIndex + 1}</span>
+              <select
+                className="inline-participant-select"
+                value={slotId}
+                disabled={saving || match.status === 'COMPLETED'}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === '__create__') {
+                    setQuickCreate({
+                      matchId: match.id,
+                      side,
+                      kind: 'PLAYER',
+                      name: '',
+                      slotIndex,
+                    });
+                    return;
+                  }
+                  if (value === '__tbd__') {
+                    commitSlot(slotIndex, null);
+                    return;
+                  }
+                  if (!value) {
+                    return;
+                  }
+                  commitSlot(slotIndex, value);
+                }}
+              >
+                {!slotId ? (
+                  <option value="">Player {slotIndex + 1} · TBD</option>
+                ) : null}
+                {manageablePlayers.map((player) => (
+                  <option key={player.id} value={player.id}>
+                    {player.name}
+                  </option>
+                ))}
+                <option value="__tbd__">TBD</option>
+                <option value="__create__">+ Create New Player</option>
+              </select>
+            </label>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Dedicated scoring popup for a Singles/Doubles knockout match. Clicking a
+  // bracket row opens this modal with the participant selects and score inputs;
+  // the bracket itself stays compact (same interaction as Team Battle duels).
+  function renderStandardMatchScoringModal() {
+    const match = scoringMatch
+      ? matches.find((item) => item.id === scoringMatch.id) ?? scoringMatch
+      : null;
+    if (!match || match.stage === 'TEAM_BATTLE') {
+      return null;
+    }
+
+    const matchFormat = (match.matchFormat || 'BEST_OF_3') as MatchFormat;
+    const setCount = getBestOf(matchFormat);
+    const isConfirmed = match.status === 'COMPLETED';
+    // Round-robin matches reuse this modal in a stripped-down form: the player
+    // info comes straight from the group matches (mirrored by the matrix), so
+    // no participant selects are shown and only Save/Confirm/Clear remain.
+    const isRoundRobin = match.stage === 'GROUP';
+
+    // Display-layer hard block: refuse to open the scoring panel for a match
+    // that violates the round-1-only BYE rule.
+    if (!isRoundRobin && hasIllegalKnockoutBye(match)) {
+      return (
+        <div className="scoring-modal-overlay" onClick={() => setScoringMatch(null)}>
+          <div className="scoring-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="scoring-modal-head">
+              <div className="scoring-modal-title">
+                <strong>Match Scoring</strong>
+                <span className="scoring-modal-type">Invalid bracket</span>
+              </div>
+              <button
+                className="scoring-modal-close"
+                type="button"
+                aria-label="Close scoring dialog"
+                onClick={() => setScoringMatch(null)}
+              >
+                ×
+              </button>
+            </div>
+            <p className="bye-rule-note">
+              BYE is not allowed after round 1. This match cannot be scored.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    const isEditingThisMatch = matchForm.matchId === match.id;
+    const aScores = isEditingThisMatch
+      ? matchForm.participantAScores
+      : (match.participantAScores ?? []).map(String);
+    const bScores = isEditingThisMatch
+      ? matchForm.participantBScores
+      : (match.participantBScores ?? []).map(String);
+    const scoreIsValid = isMatchScoreValid(aScores, bScores, matchFormat);
+    const isByeMatch = match.score === 'BYE';
+    const isByeSideA = match.participantAName === 'BYE';
+    const isByeSideB = match.participantBName === 'BYE';
+
+    return (
+      <div className="scoring-modal-overlay" onClick={() => setScoringMatch(null)}>
+        <div className="scoring-modal" onClick={(event) => event.stopPropagation()}>
+          <div className="scoring-modal-head">
+            <div className="scoring-modal-title">
+              <strong>Match Scoring</strong>
+              <span className="scoring-modal-type">
+                {match.matchCategory === 'STANDARD_DOUBLES' ? 'Doubles' : 'Singles'}
+              </span>
+            </div>
+            <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
+              {getMatchStatusLabel(match.status)}
+            </span>
+            <button
+              className="scoring-modal-close"
+              type="button"
+              aria-label="Close scoring dialog"
+              onClick={() => setScoringMatch(null)}
+            >
+              ×
+            </button>
+          </div>
+
+          <div className="scoring-modal-sides">
+            {(['A', 'B'] as WinnerSide[]).map((side) => {
+              const isA = side === 'A';
+              const scores = isA ? aScores : bScores;
+              const isByeSide = isA ? isByeSideA : isByeSideB;
+              return (
+                <div className="scoring-side" key={side}>
+                  <div className="scoring-side-head">
+                    <strong>{isA ? 'Side A' : 'Side B'}</strong>
+                  </div>
+                  {isByeSide ? (
+                    <span className="bye-badge">BYE</span>
+                  ) : isRoundRobin ? (
+                    <div className="scoring-side-participant">
+                      <span className="participant-name">
+                        {isA ? match.participantAName : match.participantBName || 'TBD'}
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      {match.matchCategory === 'STANDARD_DOUBLES' &&
+                      match.stage === 'KNOCKOUT' ? (
+                        renderDoublesModalParticipantSelects(match, side)
+                      ) : (
+                        renderStandardModalParticipantSelect(match, side)
+                      )}
+                    </>
+                  )}
+                  {!isByeSide ? (
+                    <div className="editable-score-inputs">
+                      {Array.from({ length: setCount }, (_, index) => (
+                        <input
+                          key={`${match.id}-${side}-${index}`}
+                          className="inline-score-input"
+                          type="number"
+                          min={0}
+                          value={scores[index] ?? ''}
+                          disabled={saving || isConfirmed || isByeMatch}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            const key = isA ? 'participantAScores' : 'participantBScores';
+                            const next = [...scores];
+                            next[index] = value;
+                            setMatchForm((current) => ({
+                              ...current,
+                              matchId: match.id,
+                              [key]: next,
+                            }));
+                          }}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="scoring-modal-actions">
+            {isRoundRobin ? (
+              <>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={saving || isConfirmed}
+                  onClick={() => void saveInlineScore(match, aScores, bScores)}
+                >
+                  Save Score
+                </button>
+                <button
+                  className="confirm-button"
+                  type="button"
+                  disabled={saving || isConfirmed || !scoreIsValid}
+                  onClick={() => void confirmMatchEnd(match, aScores, bScores)}
+                  title="Finalize the match and lock the score"
+                >
+                  ✓ Confirm Match End
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void clearMatchScore(match.id)}
+                >
+                  Clear
+                </button>
+              </>
+            ) : isByeMatch ? (
+              <span className="bye-note">
+                {isConfirmed
+                  ? 'BYE — participant automatically advanced to the next round.'
+                  : 'BYE — assign the participant on the playing side to advance them automatically.'}
+              </span>
+            ) : isConfirmed ? (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={saving}
+                onClick={() => void unlockMatch(match)}
+                title="Reopen the match to correct participants or the score"
+              >
+                🔓 Unlock
+              </button>
+            ) : (
+              <>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void saveInlineScore(match, aScores, bScores)}
+                >
+                  Save Score
+                </button>
+                <button
+                  className="confirm-button"
+                  type="button"
+                  disabled={saving || !scoreIsValid}
+                  onClick={() => void confirmMatchEnd(match, aScores, bScores)}
+                  title="Finalize the match and lock the score"
+                >
+                  ✓ Confirm Match End
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void clearMatchScore(match.id)}
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </div>
+
+          {!isRoundRobin && quickCreate && quickCreate.matchId === match.id ? (
+            <div className="quick-create-form">
+              <strong>
+                Create New {quickCreate.kind === 'TEAM' ? 'Team' : 'Player'} for{' '}
+                {quickCreate.side === 'A' ? 'Side A' : 'Side B'}
+              </strong>
+              <input
+                className="inline-score-input"
+                type="text"
+                placeholder={quickCreate.kind === 'TEAM' ? 'Team / club name' : 'Player name'}
+                value={quickCreate.name}
+                onChange={(event) =>
+                  setQuickCreate((current) =>
+                    current ? { ...current, name: event.target.value } : current,
+                  )
+                }
+              />
+              <div className="editable-match-actions">
+                <button
+                  className="primary-button small"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void handleQuickCreate()}
+                >
+                  Create
+                </button>
+                <button
+                  className="secondary-button small"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => setQuickCreate(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  // ── In-place bracket editing (admin) ─────────────────────────────────────
+  // Update a match's participant on a given side. Supports singles (a single
+  // entry) and doubles (an array of two independent player entries). Team
+  // battle uses the lineup editor instead.
+  //
+  // Round-robin group matches are pre-wired to slot entries (TBD placeholders)
+  // at creation. When a participant is assigned to a match side, the slot
+  // entry mirrors the assignment so the group standings and matrix resolve;
+  // clearing a side reverts its slot entry back to TBD. Best-effort: the match
+  // side itself is already persisted before this sync runs.
+  async function syncRoundRobinSlotEntry(
+    tournamentId: string,
+    entryId: string,
+    boundIds: string[],
+    boundName: string,
+  ) {
+    const entry = entries.find(
+      (item) => item.id === entryId && item.tournamentId === tournamentId,
+    );
+    if (!entry) {
+      return;
+    }
+    const boundId = boundIds.length === 1 ? boundIds[0] : null;
+    const boundIsTeam = Boolean(boundId && manageableTeams.some((team) => team.id === boundId));
+    const payload: any = {
+      id: entryId,
+      entryName: boundName || 'TBD',
+      playerId: boundId && !boundIsTeam ? boundId : null,
+      teamId: boundId && boundIsTeam ? boundId : null,
+    };
+    try {
+      const { data } = await client.models.TournamentEntry.update(payload as any, ownerAuthMode());
+      setEntries((current) =>
+        upsertLocalItem(current, (data ?? { ...entry, ...payload }) as TournamentEntry),
+      );
+    } catch {
+      // Best-effort sync; the match side itself was already persisted.
+    }
+  }
+
+  // Current player ids bound to a round-robin slot entry. Every group match
+  // wired to the slot carries the same pair, so reading the first match keeps
+  // the roster modal / entry dropdowns in sync without extra bookkeeping.
+  function getRoundRobinSlotPlayerIds(tournamentId: string, entryId: string): string[] {
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+    const boundMatch = matches.find(
+      (match) =>
+        match.tournamentId === tournamentId &&
+        (match.participantAEntryId === entryId || match.participantBEntryId === entryId),
+    );
+    const ids = boundMatch
+      ? getParticipantEntryIds(
+          boundMatch,
+          boundMatch.participantAEntryId === entryId ? 'A' : 'B',
+        )
+      : [];
+    return ids.filter((id) => playerIdToName.has(id));
+  }
+
+  // Round-robin entry assignment: bind a player (singles) or a two-player pair
+  // (doubles) to a slot entry and propagate the same side to every group match
+  // wired to that slot. The slot entry mirrors the display name so standings
+  // rows and matrix headers resolve; the matches carry the concrete player ids
+  // so the scoring modal and matrix pair up exactly. Clearing the slot reverts
+  // everything back to TBD.
+  async function assignRoundRobinSlot(
+    tournamentId: string,
+    entryId: string,
+    boundIds: string[],
+    boundName: string,
+  ) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const nextIds = boundIds.filter(Boolean);
+    const displayName = nextIds.length ? boundName : 'TBD';
+
+    const slotMatches = matches.filter(
+      (match) =>
+        match.tournamentId === tournamentId &&
+        (match.participantAEntryId === entryId || match.participantBEntryId === entryId),
+    );
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      // Mirror the assignment into the slot entry (standings / matrix headers).
+      await syncRoundRobinSlotEntry(tournamentId, entryId, nextIds, displayName);
+
+      // Propagate to every group match side wired to this slot.
+      await Promise.all(
+        slotMatches.map(async (match) => {
+          const isA = match.participantAEntryId === entryId;
+          const payload: any = {
+            id: match.id,
+            ...(isA
+              ? {
+                  participantAEntryIds: nextIds.length ? nextIds : null,
+                  participantAName: displayName,
+                }
+              : {
+                  participantBEntryIds: nextIds.length ? nextIds : null,
+                  participantBName: displayName,
+                }),
+          };
+          const { data } = await client.models.Match.update(payload as any, ownerAuthMode());
+          setMatches((current) =>
+            mergeMatchState(current, match.id, payload, data as Match | null),
+          );
+        }),
+      );
+
+      setStatusMessage(
+        `Entry "${displayName}" synced to ${slotMatches.length} round-robin match${slotMatches.length === 1 ? '' : 'es'}.`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to assign the entry.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Single-player slot dropdown rendered in the Entry column of a round-robin
+  // standings table. The select is freely re-selectable and a trailing TBD
+  // option clears the slot back to an undecided entry.
+  function renderRoundRobinSlotSelect(
+    tournamentId: string,
+    entryId: string,
+    currentName: string | null | undefined,
+  ) {
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+    const boundIds = getRoundRobinSlotPlayerIds(tournamentId, entryId);
+    const currentValue = boundIds[0] && playerIdToName.has(boundIds[0]) ? boundIds[0] : '';
+
+    return (
+      <select
+        className="inline-participant-select rr-slot-select"
+        value={currentValue}
+        disabled={saving}
+        onChange={(event) => {
+          const value = event.target.value;
+          if (value === '__tbd__') {
+            void assignRoundRobinSlot(tournamentId, entryId, [], 'TBD');
+            return;
+          }
+          if (!value) {
+            return;
+          }
+          const option = manageablePlayers.find((player) => player.id === value);
+          void assignRoundRobinSlot(tournamentId, entryId, [value], option?.name ?? 'TBD');
+        }}
+      >
+        {!currentValue ? <option value="">{currentName || 'TBD'}</option> : null}
+        {manageablePlayers.map((player) => (
+          <option key={player.id} value={player.id}>
+            {player.name}
+          </option>
+        ))}
+        <option value="__tbd__">TBD</option>
+      </select>
+    );
+  }
+
+  // Round-robin doubles roster popup. One row per slot of the selected group,
+  // each row offering two independent player dropdowns (Player 1 / Player 2).
+  // Selections update the slot and all its matches in real time.
+  function renderRoundRobinRosterModal() {
+    if (!rrRoster || !isAuthenticated) {
+      return null;
+    }
+    const tournament = tournaments.find((item) => item.id === rrRoster.tournamentId);
+    if (!tournament) {
+      return null;
+    }
+    const groupEntries = entries
+      .filter(
+        (entry) =>
+          entry.tournamentId === rrRoster.tournamentId && entry.groupName === rrRoster.groupName,
+      )
+      .sort((left, right) => (left.slotNumber ?? 0) - (right.slotNumber ?? 0));
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+
+    const commitRow = (entryId: string, nextIds: (string | undefined)[]) => {
+      const ids = nextIds.filter(Boolean) as string[];
+      const name = ids.length
+        ? ids.map((id) => playerIdToName.get(id) ?? 'TBD').join(' / ')
+        : 'TBD';
+      void assignRoundRobinSlot(rrRoster.tournamentId, entryId, ids, name);
+    };
+
+    return (
+      <div className="scoring-modal-overlay" onClick={() => setRrRoster(null)}>
+        <div className="scoring-modal" onClick={(event) => event.stopPropagation()}>
+          <div className="scoring-modal-head">
+            <div className="scoring-modal-title">
+              <strong>Group {rrRoster.groupName} Entries</strong>
+              <span className="scoring-modal-type">Doubles</span>
+            </div>
+            <button
+              className="scoring-modal-close"
+              type="button"
+              aria-label="Close roster dialog"
+              onClick={() => setRrRoster(null)}
+            >
+              ×
+            </button>
+          </div>
+          <div className="rr-roster-list">
+            {groupEntries.map((entry) => {
+              const boundIds = getRoundRobinSlotPlayerIds(rrRoster.tournamentId, entry.id);
+              const slotIds: (string | undefined)[] = [boundIds[0], boundIds[1]];
+              return (
+                <div className="rr-roster-row" key={entry.id}>
+                  <span className="rr-roster-row-label">
+                    Entry {entry.slotNumber ?? ''}
+                  </span>
+                  {[0, 1].map((slotIndex) => {
+                    const slotId = slotIds[slotIndex] ?? '';
+                    return (
+                      <label
+                        className="team-lineup-select"
+                        key={`${entry.id}-${slotIndex}`}
+                      >
+                        <span>Player {slotIndex + 1}</span>
+                        <select
+                          className="inline-participant-select"
+                          value={slotId}
+                          disabled={saving}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            if (value === '__tbd__') {
+                              const next = [...slotIds];
+                              next[slotIndex] = undefined;
+                              commitRow(entry.id, next);
+                              return;
+                            }
+                            if (!value) {
+                              return;
+                            }
+                            const next = [...slotIds];
+                            next[slotIndex] = value;
+                            commitRow(entry.id, next);
+                          }}
+                        >
+                          {!slotId ? (
+                            <option value="">Player {slotIndex + 1} · TBD</option>
+                          ) : null}
+                          {manageablePlayers.map((player) => (
+                            <option key={player.id} value={player.id}>
+                              {player.name}
+                            </option>
+                          ))}
+                          <option value="__tbd__">TBD</option>
+                        </select>
+                      </label>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+          <div className="scoring-modal-actions">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={saving}
+              onClick={() => setRrRoster(null)}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  async function updateMatchParticipant(
+    match: Match,
+    side: WinnerSide,
+    entryIds: string[],
+    entryName: string,
+  ) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const isA = side === 'A';
+
+    // Replace the whole side with the selected entries (1 player for singles,
+    // the full 2-player pair for doubles).
+    const nextIds = entryIds.filter(Boolean);
+
+    // Round robin: every group match side is wired to a slot entry created at
+    // tournament build time. The slot entry id stays in participantXEntryId so
+    // the group standings and matrix keep resolving the same slot; the picked
+    // participant ids live in participantXEntryIds and the slot entry mirrors
+    // the current name so standings rows show the actual player.
+    const isRoundRobin = match.stage === 'GROUP';
+    const slotEntryId = isA ? match.participantAEntryId : match.participantBEntryId;
+
+    const updatePayload: any = {
+      id: match.id,
+      ...(isA
+        ? {
+            participantAEntryId: isRoundRobin
+              ? (slotEntryId ?? null)
+              : nextIds.length === 1
+                ? nextIds[0]
+                : null,
+            participantAEntryIds: nextIds.length ? nextIds : null,
+            participantAName: entryName,
+          }
+        : {
+            participantBEntryId: isRoundRobin
+              ? (slotEntryId ?? null)
+              : nextIds.length === 1
+                ? nextIds[0]
+                : null,
+            participantBEntryIds: nextIds.length ? nextIds : null,
+            participantBName: entryName,
+          }),
+    };
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      const { data } = await client.models.Match.update(updatePayload as any, ownerAuthMode());
+      setMatches((current) => mergeMatchState(current, match.id, updatePayload, data as Match | null));
+
+      // Keep the round-robin slot entry in sync (standings / matrix resolve).
+      if (isRoundRobin && slotEntryId) {
+        await syncRoundRobinSlotEntry(match.tournamentId, slotEntryId, nextIds, entryName);
+      }
+
+      // BYE auto-advance: in a knockout draw, when the participant on the
+      // playing side of a BYE match is assigned, they automatically win the
+      // match and advance to the next round. No score entry is needed. BYEs
+      // are only allowed in round 1, so this auto-advance is hard-gated to
+      // round 1 — a later-round BYE can never silently promote a participant.
+      // A doubles side must be a complete pair before it can auto-advance.
+      if (match.stage === 'KNOCKOUT' && match.roundNumber === 1) {
+        const otherSideName = isA ? match.participantBName : match.participantAName;
+        if (otherSideName === 'BYE') {
+          if (match.matchCategory === 'STANDARD_DOUBLES' && nextIds.length < 2) {
+            setStatusMessage(
+              'Both doubles players are required before the BYE auto-advance.',
+            );
+            return;
+          }
+          const advancePayload: any = {
+            id: match.id,
+            status: 'COMPLETED',
+            winnerSide: isA ? 'A' : 'B',
+            winnerEntryId: nextIds.length === 1 ? nextIds[0] : null,
+            winnerEntryIds: nextIds.length ? nextIds : null,
+            score: 'BYE',
+            completedAt: new Date().toISOString(),
+          };
+          const { data: advanceData } = await client.models.Match.update(
+            advancePayload as any,
+            ownerAuthMode(),
+          );
+          const withAdvance = mergeMatchState(
+            matches,
+            match.id,
+            advancePayload,
+            advanceData as Match | null,
+          );
+          setMatches(withAdvance);
+
+          const nextMatches = await cascadeKnockoutUpdate(
+            match.id,
+            { winnerEntryIds: nextIds, winnerName: entryName },
+            withAdvance,
+          );
+          setMatches(nextMatches);
+          await syncTournamentStatus(match.tournamentId, nextMatches);
+          setStatusMessage(`BYE match — "${entryName}" automatically advances to the next round.`);
+          return;
+        }
+      }
+
+      setStatusMessage('Match participant updated.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update participant.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Compact, click-to-score bracket row for Singles/Doubles knockout draws.
+  // The bracket only shows matchup info; the scoring panel opens in a modal
+  // when the admin clicks the row (same interaction as Team Battle duels).
+  function renderStandardMatchRow(match: Match) {
+    // Display-layer hard block: a BYE after round 1 violates the bracket rule,
+    // so the row renders a flagged warning box instead of a clickable match.
+    if (hasIllegalKnockoutBye(match)) {
+      return (
+        <div className="match-box bye-rule-violation" key={match.id}>
+          <div className="standard-match-head">
+            <span className="standard-match-round">{match.roundLabel}</span>
+            <span className="status-pill status-invalid">Invalid</span>
+          </div>
+          <p className="bye-rule-note">BYE is not allowed after round 1.</p>
+        </div>
+      );
+    }
+
+    const isByeMatch = match.score === 'BYE';
+
+    return (
+      <button
+        className={`match-box standard-match-row ${isByeMatch ? 'bye-match-row' : ''}`}
+        type="button"
+        key={match.id}
+        onClick={() => openScoringModal(match)}
+        disabled={saving}
+        title="Open the scoring panel for this match"
+      >
+        <div className="standard-match-head">
+          <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
+            {getMatchStatusLabel(match.status)}
+          </span>
+        </div>
+        {(['A', 'B'] as WinnerSide[]).map((side) => {
+          const isA = side === 'A';
+          const participantName = isA ? match.participantAName : match.participantBName;
+          const scores = getScoreList(match, side);
+          return participantName === 'BYE' ? (
+            <span className="bye-badge" key={side}>
+              BYE
+            </span>
+          ) : (
+            <div className="standard-match-slot" key={side}>
+              <span className="participant-name">{participantName || 'TBD'}</span>
+              <div className="set-score-strip">
+                {scores.length ? (
+                  scores.map((score, index) => (
+                    <span className="set-score-cell" key={`${match.id}-${side}-${index}`}>
+                      {score}
+                    </span>
+                  ))
+                ) : (
+                  <span className="set-score-placeholder">—</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        <div className="match-foot">
+          <span className="standard-match-hint">
+            {isByeMatch ? 'Automatic advance' : match.score ? '✓ scored' : '✎ score'}
+          </span>
+        </div>
+      </button>
+    );
+  }
+
+  // Render a single knockout match card for the symmetric bracket. Authenticated
+  // users get the clickable scoring row; visitors get a read-only card.
+  function renderBracketMatchCard(match: Match, finalMatch: Match | undefined) {
+    if (isAuthenticated) {
+      return renderStandardMatchRow(match);
+    }
+    if (hasIllegalKnockoutBye(match)) {
+      return (
+        <div className="match-box bye-rule-violation" key={match.id}>
+          <p className="bye-rule-note">BYE is not allowed after round 1.</p>
+        </div>
+      );
+    }
+    return (
+      <div
+        className={`match-box ${match.score === 'BYE' ? 'bye-match-row' : ''}`}
+        key={match.id}
+      >
+        {renderParticipantRow(match, 'A', finalMatch)}
+        {renderParticipantRow(match, 'B', finalMatch)}
+        <div className="match-foot">
+          <span>{match.score === 'BYE' ? 'Automatic advance' : match.score || 'Score pending'}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Render a Team Battle team selector for a given side. The dropdown enforces
+  // mutual exclusion: the team already picked for the opposite side is disabled,
+  // so the same team can never be assigned to both sides of a duel.
+  // When ignoreLocked is true the selector stays enabled even if the sample
+  // match used for the duel header is already completed.
+  function renderEditableTeamBattleSelect(
+    match: Match,
+    side: WinnerSide,
+    ignoreLocked = false,
+  ) {
+    const isA = side === 'A';
+    const teamLabel = isA ? match.participantATeamLabel : match.participantBTeamLabel;
+    const currentName = isA ? match.participantAName : match.participantBName;
+    const otherLabel = isA ? match.participantBTeamLabel : match.participantATeamLabel;
+
+    // Bind the select to the slot's bound team so the dropdown never renders a
+    // duplicate of the selected team (placeholder + real option).
+    const currentTeamId = manageableTeams.find((team) => team.name === teamLabel)?.id ?? '';
+
+    // Global mutual exclusion: a system team may only be bound to one slot in
+    // this tournament. Collect every real team name already assigned to any
+    // slot, excluding the slot this selector controls (so its team can still
+    // be re-selected or changed to a free team).
+    const realTeamNames = new Set(manageableTeams.map((team) => team.name));
+    const assignedTeamNames = new Set<string>();
+    matches
+      .filter((item) => item.tournamentId === match.tournamentId)
+      .forEach((item) => {
+        if (item.participantATeamLabel && realTeamNames.has(item.participantATeamLabel)) {
+          assignedTeamNames.add(item.participantATeamLabel);
+        }
+        if (item.participantBTeamLabel && realTeamNames.has(item.participantBTeamLabel)) {
+          assignedTeamNames.add(item.participantBTeamLabel);
+        }
+      });
+
+    return (
+      <select
+        className="inline-participant-select"
+        value={currentTeamId}
+        onChange={(event) => {
+          const value = event.target.value;
+          if (!value) {
+            return;
+          }
+          const team = manageableTeams.find((item) => item.id === value);
+          if (!team) {
+            return;
+          }
+          void selectTeamBattleTeam(match, side, team);
+        }}
+        disabled={saving || (!ignoreLocked && match.status === 'COMPLETED')}
+      >
+        {!currentTeamId ? (
+          <option value="">{teamLabel || currentName || 'Select team'}</option>
+        ) : null}
+        {manageableTeams.map((team) => {
+          const takenByOpponent = Boolean(otherLabel) && otherLabel === team.name;
+          const takenElsewhere =
+            assignedTeamNames.has(team.name) && team.name !== teamLabel;
+          return (
+            <option key={team.id} value={team.id} disabled={takenByOpponent || takenElsewhere}>
+              {team.name}
+            </option>
+          );
+        })}
+      </select>
+    );
+  }
+
+  // Save a score directly from an editable match box (in-place scoring).
+  // Saving only marks the match "in progress" — it is NOT completed until the
+  // admin explicitly confirms the match end (see confirmMatchEnd below).
+  async function saveInlineScore(
+    match: Match,
+    aInputs: Array<string | number | null | undefined>,
+    bInputs: Array<string | number | null | undefined>,
+  ) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const matchFormat = (match.matchFormat || 'BEST_OF_3') as MatchFormat;
+
+    const evaluated = evaluateMatchScore(aInputs, bInputs, matchFormat);
+    if (!evaluated) {
+      setStatusMessage('Please enter a valid score line based on the selected match format.');
       return;
     }
 
-    if (tournamentForm.eventType === 'DOUBLES') {
-      await deleteTeam(participantId);
+    const winnerEntryId =
+      evaluated.winner === 'A'
+        ? match.participantAEntryId ?? null
+        : match.participantBEntryId ?? null;
+    const updatePayload: any = {
+      id: match.id,
+      participantAScores: evaluated.participantAScores,
+      participantBScores: evaluated.participantBScores,
+      winnerEntryId,
+      winnerSide: evaluated.winner,
+      score: evaluated.summary,
+      status: 'IN_PROGRESS',
+      completedAt: null,
+    };
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      const { data } = await client.models.Match.update(updatePayload as any, ownerAuthMode());
+      const nextMatches = mergeMatchState(matches, match.id, updatePayload, data as Match | null);
+      setMatches(nextMatches);
+
+      setMatchForm({
+        matchId: match.id,
+        participantAScores: hydrateScoreInputs(evaluated.participantAScores, matchFormat),
+        participantBScores: hydrateScoreInputs(evaluated.participantBScores, matchFormat),
+      });
+      setStatusMessage('Match score saved. The match is now In Progress — confirm the match end when it finishes.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save the match score.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Admin-only action: finalize a match. Once confirmed, the status becomes
+  // COMPLETED and the score line is locked from further edits.
+  async function confirmMatchEnd(
+    match: Match,
+    aInputs: Array<string | number | null | undefined>,
+    bInputs: Array<string | number | null | undefined>,
+  ) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const matchFormat = (match.matchFormat || 'BEST_OF_3') as MatchFormat;
+
+    if (!match.participantAName || !match.participantBName) {
+      setStatusMessage('Please assign participants on both sides before confirming the match end.');
       return;
     }
 
-    await deletePlayer(participantId);
+    const evaluated = evaluateMatchScore(aInputs, bInputs, matchFormat);
+    if (!evaluated) {
+      setStatusMessage('Please enter a valid score line before confirming the match end.');
+      return;
+    }
+
+    const winnerEntryId =
+      evaluated.winner === 'A'
+        ? match.participantAEntryId ?? null
+        : match.participantBEntryId ?? null;
+    const winnerEntryIds = getParticipantEntryIds(match, evaluated.winner);
+    const winnerName =
+      evaluated.winner === 'A' ? match.participantAName : match.participantBName;
+    const updatePayload: any = {
+      id: match.id,
+      participantAScores: evaluated.participantAScores,
+      participantBScores: evaluated.participantBScores,
+      winnerEntryId,
+      winnerSide: evaluated.winner,
+      score: evaluated.summary,
+      status: 'COMPLETED',
+      completedAt: new Date().toISOString(),
+    };
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      const { data } = await client.models.Match.update(updatePayload as any, ownerAuthMode());
+      let nextMatches = mergeMatchState(matches, match.id, updatePayload, data as Match | null);
+      setMatches(nextMatches);
+
+      if (match.stage === 'KNOCKOUT') {
+        nextMatches = await cascadeKnockoutUpdate(
+          match.id,
+          { winnerEntryIds, winnerName },
+          nextMatches,
+        );
+        setMatches(nextMatches);
+      }
+
+      await syncTournamentStatus(match.tournamentId, nextMatches);
+      setMatchForm({
+        matchId: match.id,
+        participantAScores: hydrateScoreInputs(evaluated.participantAScores, matchFormat),
+        participantBScores: hydrateScoreInputs(evaluated.participantBScores, matchFormat),
+      });
+      setStatusMessage('Match confirmed as completed. The score is now locked.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to confirm the match end.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Admin-only action: reopen a completed match so wrong participant or score
+  // data can be corrected. The winner propagation to later rounds is rolled back.
+  async function unlockMatch(match: Match) {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    const updatePayload: any = {
+      id: match.id,
+      status: 'IN_PROGRESS',
+      completedAt: null,
+    };
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      const { data } = await client.models.Match.update(updatePayload as any, ownerAuthMode());
+      let nextMatches = mergeMatchState(matches, match.id, updatePayload, data as Match | null);
+      setMatches(nextMatches);
+
+      if (match.stage === 'KNOCKOUT') {
+        nextMatches = await cascadeKnockoutUpdate(match.id, {}, nextMatches);
+        setMatches(nextMatches);
+      }
+
+      await syncTournamentStatus(match.tournamentId, nextMatches);
+      setStatusMessage('Match unlocked. You can now correct participants or the score, then confirm again.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to unlock the match.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Quick-create a Player or Team from the bracket editor, then assign it to
+  // the match side that requested creation.
+  async function handleQuickCreate() {
+    if (!isAuthenticated || !quickCreate) {
+      return;
+    }
+    const name = quickCreate.name.trim();
+    if (!name) {
+      setStatusMessage('Please enter a name for the new entry.');
+      return;
+    }
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      let createdId: string;
+      let createdName: string;
+      if (quickCreate.kind === 'PLAYER') {
+        const { data } = await client.models.Player.create(
+          { name, gender: 'UNSPECIFIED' } as any,
+          ownerAuthMode(),
+        );
+        if (!data) {
+          throw new Error('Player creation failed.');
+        }
+        setPlayers((current) => upsertLocalItem(current, data as Player));
+        createdId = data.id;
+        createdName = data.name;
+      } else {
+        const { data: createdTeam } = await client.models.Team.create(
+          { name } as any,
+          ownerAuthMode(),
+        );
+        if (!createdTeam) {
+          throw new Error('Team creation failed.');
+        }
+        setTeams((current) => upsertLocalItem(current, createdTeam as Team));
+        createdId = createdTeam.id;
+        createdName = createdTeam.name;
+      }
+
+      const match = matches.find((item) => item.id === quickCreate.matchId);
+      if (match) {
+        // A doubles knockout slot ("+ Create New" inside a Player 1 / Player 2
+        // dropdown) replaces exactly that slot instead of the whole side.
+        if (quickCreate.slotIndex !== undefined) {
+          const playerIdToName = new Map(
+            manageablePlayers.map((player) => [player.id, player.name]),
+          );
+          const validSlotIds = getParticipantEntryIds(match, quickCreate.side).filter((id) =>
+            playerIdToName.has(id),
+          );
+          const next = [...validSlotIds];
+          next[quickCreate.slotIndex] = createdId;
+          const ids = next.filter(Boolean);
+          const name = ids.length
+            ? ids.map((id) => playerIdToName.get(id) ?? createdName).join(' / ')
+            : createdName;
+          await updateMatchParticipant(match, quickCreate.side, ids, name);
+        } else {
+          await updateMatchParticipant(match, quickCreate.side, [createdId], createdName);
+        }
+      }
+      setQuickCreate(null);
+      setStatusMessage(`${quickCreate.kind === 'PLAYER' ? 'Player' : 'Team'} created and assigned.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create the entry.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
   }
 
   // Determine if the page is in "bare visitor mode" (no URL params, no auth)
@@ -1912,10 +3544,35 @@ function App() {
       <section className="section-card" id="live-tournament-display">
         <div className="section-heading">
           <div>
-            <p className="section-tag">Visitor View</p>
-            <h2>Live Tournament Display</h2>
+            <p className="section-tag">Tournament Display</p>
+            <h2>Tournament Display</h2>
           </div>
+          <span className={`status-pill status-${displayStatus === 'FINISHED' ? 'completed' : 'live'}`}>
+            {displayStatus === 'FINISHED' ? 'Finished' : 'LIVE'}
+          </span>
         </div>
+
+        {tournamentCards.length > 1 && (
+          <div className="event-filter-bar">
+            <button
+              type="button"
+              className={`event-filter-chip ${selectedEventId === 'all' ? 'active' : ''}`}
+              onClick={() => setSelectedEventId('all')}
+            >
+              All Events
+            </button>
+            {tournamentCards.map(({ tournament }) => (
+              <button
+                type="button"
+                key={tournament.id}
+                className={`event-filter-chip ${selectedEventId === tournament.id ? 'active' : ''}`}
+                onClick={() => setSelectedEventId(tournament.id)}
+              >
+                {tournament.eventName || tournament.name}
+              </button>
+            ))}
+          </div>
+        )}
 
         {tournamentCards.length === 0 ? (
           <div className="empty-state">
@@ -1925,7 +3582,7 @@ function App() {
           </div>
         ) : (
           <div className="tournament-grid">
-            {tournamentCards.map(({ tournament, entries: tournamentEntries, matches: tournamentMatches, standings, teamSummary, teamDuels }) => {
+            {visibleTournamentCards.map(({ tournament, entries: tournamentEntries, matches: tournamentMatches, standings, teamSummary, teamDuels }) => {
               const finalMatch = getFinalMatch(tournamentMatches);
               return (
                 <article className="tournament-card" key={tournament.id}>
@@ -1935,99 +3592,142 @@ function App() {
                         {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
                         {getMatchFormatLabel(tournament.matchFormat)}
                       </p>
-                      <h3>{tournament.name}</h3>
+                      <h3>
+                        {tournament.name}
+                        {tournament.eventName ? (
+                          <span className="card-event-name"> · {tournament.eventName}</span>
+                        ) : null}
+                      </h3>
                     </div>
-                    <span className={`status-pill status-${String(tournament.status).toLowerCase()}`}>
-                      {tournament.status === 'COMPLETED' ? 'Completed' : 'Live'}
+                    <span className={`status-pill status-${finalMatch && finalMatch.status === 'COMPLETED' ? 'completed' : 'live'}`}>
+                      {finalMatch && finalMatch.status === 'COMPLETED' ? 'Finished' : 'Live'}
                     </span>
                   </div>
 
                   {tournament.mode === 'KNOCKOUT' ? (
-                    <div className="bracket-rounds">
-                      {groupKnockoutRounds(tournamentMatches).map(([round, roundMatches]) => (
-                        <div className="round-column" key={`${tournament.id}-${round}`}>
-                          <h4>{roundMatches[0]?.roundLabel ?? `Round ${round}`}</h4>
-                          {roundMatches.map((match) => (
-                            <div className="match-box" key={match.id}>
-                              {renderParticipantRow(match, 'A', finalMatch)}
-                              {renderParticipantRow(match, 'B', finalMatch)}
-                              <div className="match-foot">
-                                <span>{match.score === 'BYE' ? 'Automatic advance by BYE' : match.score || 'Score pending'}</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
+                    <KnockoutBracket
+                      matches={tournamentMatches}
+                      renderCard={(match, final) => renderBracketMatchCard(match, final)}
+                    />
                   ) : null}
 
                   {tournament.mode === 'ROUND_ROBIN' ? (
                     <div className="group-layout">
-                      {standings.map((group) => (
-                        <section className="group-card" key={`${tournament.id}-${group.groupName}`}>
-                          <div className="group-head">
-                            <h4>Group {group.groupName}</h4>
-                            <span>Top {tournament.qualifyPerGroup ?? 2} advance</span>
-                          </div>
-                          <div className="table-wrap">
-                            <table>
-                              <thead>
-                                <tr>
-                                  <th>Entry</th>
-                                  <th>Points</th>
-                                  <th>Wins</th>
-                                  <th>Games Won</th>
-                                  <th>Net Games</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {group.standings.map((row, index) => (
-                                  <tr
-                                    key={row.entryId}
-                                    className={index < (tournament.qualifyPerGroup ?? 2) ? 'qualified' : ''}
-                                  >
-                                    <td>{row.entryName}</td>
-                                    <td>{row.points}</td>
-                                    <td>{row.wins}</td>
-                                    <td>{row.gamesWon}</td>
-                                    <td>{row.gamesWon - row.gamesLost}</td>
+                      {standings.map((group) => {
+                        const matrix = formatRoundRobinMatrix(
+                          tournamentEntries as any[],
+                          tournamentMatches as any[],
+                          group.groupName,
+                        );
+                        const isDoubles = tournament.eventType === 'DOUBLES';
+                        return (
+                          <section className="group-card" key={`${tournament.id}-${group.groupName}`}>
+                            <div className="group-head">
+                              <h4>Group {group.groupName}</h4>
+                              <span>Top {tournament.qualifyPerGroup ?? 2} advance</span>
+                            </div>
+                            <div className="table-wrap">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    <th>Entry</th>
+                                    <th>Points</th>
+                                    <th>Wins</th>
+                                    <th>Games Won</th>
+                                    <th>Net Games</th>
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                          <div className="table-wrap">
-                            <table className="matrix-table">
-                              <thead>
-                                <tr>
-                                  <th>Round Robin Matrix</th>
-                                  {formatRoundRobinMatrix(
-                                    tournamentEntries as any[],
-                                    tournamentMatches as any[],
-                                    group.groupName,
-                                  ).map((item) => (
-                                    <th key={`${group.groupName}-${item.entry.id}`}>{item.entry.entryName}</th>
+                                </thead>
+                                <tbody>
+                                  {group.standings.map((row, index) => (
+                                    <tr
+                                      key={row.entryId}
+                                      className={index < (tournament.qualifyPerGroup ?? 2) ? 'qualified' : ''}
+                                    >
+                                      <td>
+                                        {isAuthenticated ? (
+                                          isDoubles ? (
+                                            <button
+                                              className="rr-entry-button"
+                                              type="button"
+                                              disabled={saving}
+                                              title="Edit the two players of this entry"
+                                              onClick={() =>
+                                                setRrRoster({
+                                                  tournamentId: tournament.id,
+                                                  groupName: group.groupName,
+                                                })
+                                              }
+                                            >
+                                              {row.entryName || 'TBD'}
+                                            </button>
+                                          ) : (
+                                            renderRoundRobinSlotSelect(
+                                              tournament.id,
+                                              row.entryId,
+                                              row.entryName,
+                                            )
+                                          )
+                                        ) : (
+                                          row.entryName
+                                        )}
+                                      </td>
+                                      <td>{row.points}</td>
+                                      <td>{row.wins}</td>
+                                      <td>{row.gamesWon}</td>
+                                      <td>{row.gamesWon - row.gamesLost}</td>
+                                    </tr>
                                   ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {formatRoundRobinMatrix(
-                                  tournamentEntries as any[],
-                                  tournamentMatches as any[],
-                                  group.groupName,
-                                ).map((row) => (
-                                  <tr key={row.entry.id}>
-                                    <td>{row.entry.entryName}</td>
-                                    {row.cells.map((cell, index) => (
-                                      <td key={`${row.entry.id}-${index}`}>{cell}</td>
+                                </tbody>
+                              </table>
+                            </div>
+                            <div className="table-wrap">
+                              <table className="matrix-table">
+                                <thead>
+                                  <tr>
+                                    <th>Round Robin Matrix</th>
+                                    {matrix.map((item) => (
+                                      <th key={`${group.groupName}-${item.entry.id}`}>{item.entry.entryName}</th>
                                     ))}
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </section>
-                      ))}
+                                </thead>
+                                <tbody>
+                                  {matrix.map((row) => (
+                                    <tr key={row.entry.id}>
+                                      <td>{row.entry.entryName}</td>
+                                      {row.cells.map((cell, index) => {
+                                        const columnEntry = matrix[index].entry;
+                                        const groupMatch = findGroupMatch(
+                                          tournamentMatches,
+                                          group.groupName,
+                                          row.entry.id,
+                                          columnEntry.id,
+                                        );
+                                        return (
+                                          <td key={`${row.entry.id}-${index}`}>
+                                            {isAuthenticated && groupMatch ? (
+                                              <button
+                                                className="rr-score-cell"
+                                                type="button"
+                                                disabled={saving}
+                                                title="Open the scoring panel for this match"
+                                                onClick={() => openScoringModal(groupMatch)}
+                                              >
+                                                {cell}
+                                              </button>
+                                            ) : (
+                                              cell
+                                            )}
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </section>
+                        );
+                      })}
                     </div>
                   ) : null}
 
@@ -2077,9 +3777,52 @@ function App() {
                               ))}
                             </div>
 
-                            <div className="team-submatch-list">
-                              {duel.matches.map((match) => renderTeamBattleMatchCard(match))}
-                            </div>
+                            {isAuthenticated ? (
+                              <div className="team-duel-main">
+                                <div className="team-duel-vs-head">
+                                  <div className="team-duel-vs-side">
+                                    {renderEditableTeamBattleSelect(duel.matches[0], 'A', true)}
+                                  </div>
+                                  <span className="team-duel-vs-text">vs</span>
+                                  <div className="team-duel-vs-side">
+                                    {renderEditableTeamBattleSelect(duel.matches[0], 'B', true)}
+                                  </div>
+                                </div>
+                                <div className="team-duel-schedule">
+                                  {duel.matches.map((match) => (
+                                    <button
+                                      className="team-duel-row"
+                                      type="button"
+                                      key={match.id}
+                                      onClick={() => openScoringModal(match)}
+                                    >
+                                      <span className="team-duel-row-type">
+                                        {match.matchCategory === 'TEAM_DOUBLES'
+                                          ? 'Doubles'
+                                          : 'Singles'}
+                                      </span>
+                                      <span className="team-duel-row-players">
+                                        <span>{match.participantAName || 'TBD'}</span>
+                                        <span className="team-duel-row-vs">vs</span>
+                                        <span>{match.participantBName || 'TBD'}</span>
+                                      </span>
+                                      <span className="team-duel-row-score">
+                                        {getMatchDisplayScore(match)}
+                                      </span>
+                                      <span
+                                        className={`status-pill status-${String(match.status).toLowerCase()}`}
+                                      >
+                                        {getMatchStatusLabel(match.status)}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="team-submatch-list">
+                                {duel.matches.map((match) => renderTeamBattleMatchCard(match))}
+                              </div>
+                            )}
                           </section>
                         ))}
                       </div>
@@ -2103,8 +3846,8 @@ function App() {
               <h2>Admin Management</h2>
             </div>
             <p className="section-desc">
-              The owner console supports seeded manual selection, random draw, multi-set score entry,
-              knockout propagation, and team battle scheduling.
+              The owner console manages tournament creation, seeded manual selection, random draw,
+              players, and teams. Match scoring now happens directly on the tournament display below.
             </p>
           </div>
 
@@ -2129,7 +3872,38 @@ function App() {
 
             {statusMessage ? <div className="status-banner">{statusMessage}</div> : null}
 
+            <div className="admin-tabs" role="tablist" aria-label="Admin management sections">
+              <button
+                className={`admin-tab-button ${adminTab === 'tournaments' ? 'active' : ''}`}
+                type="button"
+                role="tab"
+                aria-selected={adminTab === 'tournaments'}
+                onClick={() => setAdminTab('tournaments')}
+              >
+                🏆 Tournaments
+              </button>
+              <button
+                className={`admin-tab-button ${adminTab === 'players' ? 'active' : ''}`}
+                type="button"
+                role="tab"
+                aria-selected={adminTab === 'players'}
+                onClick={() => setAdminTab('players')}
+              >
+                👤 Players
+              </button>
+              <button
+                className={`admin-tab-button ${adminTab === 'teams' ? 'active' : ''}`}
+                type="button"
+                role="tab"
+                aria-selected={adminTab === 'teams'}
+                onClick={() => setAdminTab('teams')}
+              >
+                👥 Teams
+              </button>
+            </div>
+
             <div className="admin-grid">
+              {adminTab === 'players' && (
               <form className="panel-form" onSubmit={createPlayer}>
                 <h3>Add Player</h3>
                 <label>
@@ -2164,59 +3938,57 @@ function App() {
                   Save player
                 </button>
               </form>
+              )}
 
+              {adminTab === 'teams' && (
               <form className="panel-form" onSubmit={createTeam}>
-                <h3>Create Doubles Team</h3>
+                <h3>Create Team</h3>
                 <label>
-                  Team name
+                  Team / club name
                   <input
                     type="text"
                     value={teamForm.name}
                     onChange={(event) =>
                       setTeamForm((current) => ({ ...current, name: event.target.value }))
                     }
-                    placeholder="Leave empty to auto-generate"
+                    placeholder="e.g. TC Neureut Team A"
+                    required
                   />
                 </label>
-                <label>
-                  Player A
-                  <select
-                    value={teamForm.playerOneId}
-                    onChange={(event) =>
-                      setTeamForm((current) => ({ ...current, playerOneId: event.target.value }))
-                    }
-                    required
-                  >
-                    <option value="">Select a player</option>
-                    {manageablePlayers.map((player) => (
-                      <option key={player.id} value={player.id}>
-                        {player.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Player B
-                  <select
-                    value={teamForm.playerTwoId}
-                    onChange={(event) =>
-                      setTeamForm((current) => ({ ...current, playerTwoId: event.target.value }))
-                    }
-                    required
-                  >
-                    <option value="">Select a player</option>
-                    {manageablePlayers.map((player) => (
-                      <option key={player.id} value={player.id}>
-                        {player.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <fieldset className="member-picker">
+                  <legend>Team members</legend>
+                  {manageablePlayers.length === 0 ? (
+                    <p className="empty-hint">No players available. Create players first.</p>
+                  ) : (
+                    manageablePlayers.map((player) => {
+                      const checked = teamForm.memberIds.includes(player.id);
+                      return (
+                        <label key={player.id} className="member-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) =>
+                              setTeamForm((current) => {
+                                const memberIds = event.target.checked
+                                  ? [...current.memberIds, player.id]
+                                  : current.memberIds.filter((id) => id !== player.id);
+                                return { ...current, memberIds };
+                              })
+                            }
+                          />
+                          <span>{player.name}</span>
+                        </label>
+                      );
+                    })
+                  )}
+                </fieldset>
                 <button className="primary-button" type="submit" disabled={saving}>
-                  Save doubles team
+                  Save team
                 </button>
               </form>
+              )}
 
+              {adminTab === 'tournaments' && (
               <form className="panel-form full-span" onSubmit={createTournament}>
                 <h3>Create Tournament</h3>
 
@@ -2225,12 +3997,29 @@ function App() {
                     Tournament name
                     <input
                       type="text"
+                      list="tournament-name-options"
                       value={tournamentForm.name}
                       onChange={(event) =>
                         setTournamentForm((current) => ({ ...current, name: event.target.value }))
                       }
-                      placeholder="2026 Summer Club Cup - Men's Singles"
+                      placeholder="2026 Summer Club Cup"
                       required
+                    />
+                    <datalist id="tournament-name-options">
+                      {eventGroups.map((group) => (
+                        <option key={group.id} value={group.name} />
+                      ))}
+                    </datalist>
+                  </label>
+                  <label>
+                    Event name
+                    <input
+                      type="text"
+                      value={tournamentForm.eventName}
+                      onChange={(event) =>
+                        setTournamentForm((current) => ({ ...current, eventName: event.target.value }))
+                      }
+                      placeholder="Men's Singles, Team Battle 50, ..."
                     />
                   </label>
                   <label>
@@ -2303,36 +4092,54 @@ function App() {
                         />
                       </label>
                       <label>
-                        Players per team
+                        Singles per duel
                         <input
                           type="number"
-                          min={2}
-                          step={2}
-                          value={tournamentForm.teamSize}
+                          min={1}
+                          value={tournamentForm.singlesPerDuel}
                           onChange={(event) =>
                             setTournamentForm((current) => ({
                               ...current,
-                              teamSize: Number(event.target.value),
-                              selectedParticipantIds: [],
+                              singlesPerDuel: Math.max(1, Number(event.target.value)),
                             }))
                           }
                         />
                       </label>
-                      {normalizeTeamLabels(
-                        tournamentForm.teamLabels,
-                        tournamentForm.teamCount,
-                      ).map((label, index) => (
-                        <label key={`team-label-${index}`}>
-                          Team {index + 1} label
-                          <input
-                            type="text"
-                            value={label}
-                            onChange={(event) => updateTeamLabel(index, event.target.value)}
-                          />
-                        </label>
-                      ))}
+                      <label>
+                        Doubles per duel
+                        <input
+                          type="number"
+                          min={1}
+                          value={tournamentForm.doublesPerDuel}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              doublesPerDuel: Math.max(1, Number(event.target.value)),
+                            }))
+                          }
+                        />
+                      </label>
                     </>
                   )}
+
+                  {tournamentForm.eventType !== 'TEAM' && tournamentForm.mode === 'KNOCKOUT' ? (
+                    <label>
+                      Number of participants
+                      <input
+                        type="number"
+                        min={2}
+                        max={64}
+                        required
+                        value={tournamentForm.knockoutParticipants}
+                        onChange={(event) =>
+                          setTournamentForm((current) => ({
+                            ...current,
+                            knockoutParticipants: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                  ) : null}
 
                   {tournamentForm.eventType !== 'TEAM' && tournamentForm.mode === 'ROUND_ROBIN' ? (
                     <>
@@ -2347,6 +4154,21 @@ function App() {
                             setTournamentForm((current) => ({
                               ...current,
                               groupCount: Number(event.target.value),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Participants per group
+                        <input
+                          type="number"
+                          min={2}
+                          max={16}
+                          value={tournamentForm.playersPerGroup}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              playersPerGroup: Number(event.target.value),
                             }))
                           }
                         />
@@ -2369,238 +4191,15 @@ function App() {
                     </>
                   ) : null}
 
-                  {tournamentForm.eventType !== 'TEAM' && tournamentForm.mode === 'KNOCKOUT' ? (
-                    <label className="wide-field">
-                      Custom round labels
-                      <input
-                        type="text"
-                        value={tournamentForm.customRoundLabels}
-                        onChange={(event) =>
-                          setTournamentForm((current) => ({
-                            ...current,
-                            customRoundLabels: event.target.value,
-                          }))
-                        }
-                        placeholder="Qualifier, Quarterfinal, Semifinal, Final"
-                      />
-                    </label>
-                  ) : null}
                 </div>
-
-                <fieldset className="participant-picker">
-                  <legend>
-                    Select{' '}
-                    {tournamentForm.eventType === 'DOUBLES'
-                      ? 'doubles teams'
-                      : tournamentForm.eventType === 'TEAM'
-                        ? 'players for team battle'
-                        : 'players'}
-                  </legend>
-
-                  <div className="participant-picker-toolbar">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={handleRandomDraw}
-                      disabled={tournamentForm.selectedParticipantIds.length < 2}
-                    >
-                      🎲 Random Draw / Shuffle
-                    </button>
-                    <span className="picker-hint">
-                      Selection order becomes the live seed order shown as #1, #2, #3...
-                    </span>
-                  </div>
-
-                  <div className="participant-options">
-                    {availableParticipantOptions.map((participant) => {
-                      const seedOrder = selectedOrderMap.get(participant.id);
-                      return (
-                        <label
-                          key={participant.id}
-                          className={`checkbox-chip ${seedOrder ? 'checkbox-chip-active' : ''}`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={Boolean(seedOrder)}
-                            onChange={(event) =>
-                              toggleParticipantSelection(participant.id, event.target.checked)
-                            }
-                          />
-                          <span className="checkbox-chip-label">{participant.name}</span>
-                          {seedOrder ? <span className="seed-order-badge">#{seedOrder}</span> : null}
-                          <button
-                            className="chip-remove-button"
-                            type="button"
-                            aria-label={
-                              seedOrder
-                                ? `Remove ${participant.name} from selection`
-                                : `Delete ${participant.name}`
-                            }
-                            title={
-                              seedOrder
-                                ? 'Remove from current selection'
-                                : 'Delete this saved entry'
-                            }
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                              void handleParticipantChipRemove(participant.id);
-                            }}
-                            disabled={saving}
-                          >
-                            ×
-                          </button>
-                        </label>
-                      );
-                    })}
-                  </div>
-
-                  {selectedParticipants.length ? (
-                    <div className="selected-order-panel">
-                      <strong>Current selection order</strong>
-                      <div className="selected-order-chips">
-                        {selectedParticipants.map((participant) => (
-                          <span className="selected-order-chip" key={participant.id}>
-                            <span>
-                              #{participant.order} {participant.name}
-                            </span>
-                            <button
-                              className="selected-chip-remove"
-                              type="button"
-                              aria-label={`Remove ${participant.name} from selection`}
-                              onClick={() => unselectParticipant(participant.id)}
-                              disabled={saving}
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {teamBattlePreview.length ? (
-                    <div className="team-preview-grid">
-                      {teamBattlePreview.map((team) => (
-                        <div className="team-preview-card" key={team.label}>
-                          <h4>{team.label}</h4>
-                          {team.members.length ? (
-                            team.members.map((member, index) => (
-                              <div className="team-preview-row" key={`${team.label}-${member.id}`}>
-                                <span>#{index + 1}</span>
-                                <strong>{member.name}</strong>
-                              </div>
-                            ))
-                          ) : (
-                            <p className="team-preview-empty">No players assigned yet.</p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </fieldset>
 
                 <button className="primary-button" type="submit" disabled={saving}>
                   Create draw and schedule
                 </button>
               </form>
+              )}
 
-              <form className="panel-form" onSubmit={recordMatch}>
-                <h3>Record Match Score</h3>
-                <label>
-                  Select match
-                  <select
-                    value={matchForm.matchId}
-                    onChange={(event) => handleMatchSelection(event.target.value)}
-                    required
-                  >
-                    <option value="">Choose a match</option>
-                    {adminScorableMatches.map((match) => (
-                      <option key={match.id} value={match.id}>
-                        [{match.status === 'COMPLETED' ? 'Completed' : 'Open'}] {match.roundLabel} -{' '}
-                        {match.participantAName || 'TBD'} vs {match.participantBName || 'TBD'} ·{' '}
-                        {getMatchDisplayScore(match)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                {selectedMatch ? (
-                  <div className="match-entry-panel">
-                    <div className="match-entry-head">
-                      <strong>{selectedMatch.roundLabel}</strong>
-                      <span>
-                        {getMatchFormatLabel(selectedMatchFormat)} · {selectedMatch.status}
-                      </span>
-                    </div>
-
-                    {renderTeamBattleLineupEditor(selectedMatch)}
-
-                    <div className="set-entry-header">
-                      <span>Entry</span>
-                      {Array.from({ length: getBestOf(selectedMatchFormat) }, (_, index) => (
-                        <span key={`set-header-${index}`}>Set {index + 1}</span>
-                      ))}
-                    </div>
-
-                    {([
-                      { side: 'A' as const, label: selectedMatch.participantAName || 'TBD' },
-                      { side: 'B' as const, label: selectedMatch.participantBName || 'TBD' },
-                    ]).map((participant) => (
-                      <div className="set-entry-row" key={`${selectedMatch.id}-${participant.side}`}>
-                        <strong>{participant.label}</strong>
-                        {(participant.side === 'A'
-                          ? matchForm.participantAScores
-                          : matchForm.participantBScores
-                        )
-                          .slice(0, getBestOf(selectedMatchFormat))
-                          .map((value, index) => (
-                            <input
-                              key={`${selectedMatch.id}-${participant.side}-${index}`}
-                              type="number"
-                              min={0}
-                              value={value}
-                              onChange={(event) => {
-                                const nextValue = event.target.value;
-                                setMatchForm((current) => {
-                                  const key =
-                                    participant.side === 'A'
-                                      ? 'participantAScores'
-                                      : 'participantBScores';
-                                  const nextScores = [...current[key]];
-                                  nextScores[index] = nextValue;
-                                  return {
-                                    ...current,
-                                    [key]: nextScores,
-                                  };
-                                });
-                              }}
-                            />
-                          ))}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="empty-state compact-empty">
-                    Select a match to enter multi-set scores.
-                  </div>
-                )}
-
-                <div className="match-entry-actions">
-                  <button className="primary-button" type="submit" disabled={saving || !selectedMatch}>
-                    Save score
-                  </button>
-                  <button
-                    className="danger-button"
-                    type="button"
-                    disabled={saving || !selectedMatch || selectedMatch.status !== 'COMPLETED'}
-                    onClick={() => void clearMatchScore()}
-                  >
-                    Delete score
-                  </button>
-                </div>
-              </form>
-
+              {adminTab === 'tournaments' && (
               <div className="panel-form">
                 <h3>Tournament Management</h3>
                 <div className="admin-list">
@@ -2611,6 +4210,9 @@ function App() {
                       <div className="admin-list-item" key={tournament.id}>
                         <div>
                           <strong>{tournament.name}</strong>
+                          {tournament.eventName ? (
+                            <p className="event-name-line">{tournament.eventName}</p>
+                          ) : null}
                           <p>
                             {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
                             {getMatchFormatLabel(tournament.matchFormat)} ·{' '}
@@ -2622,7 +4224,8 @@ function App() {
                             className="secondary-button"
                             type="button"
                             onClick={() => {
-                              const url = `${window.location.origin}${window.location.pathname}?tournamentId=${tournament.id}`;
+                              const shareId = tournament.eventGroupId ?? tournament.id;
+                              const url = `${window.location.origin}${window.location.pathname}?tournamentId=${shareId}`;
                               copyToClipboard(url).then(() => {
                                 setStatusMessage('🔗 Share link copied to clipboard!');
                               }).catch(() => {
@@ -2655,8 +4258,10 @@ function App() {
                   )}
                 </div>
               </div>
+              )}
 
               {/* Archived Tournaments Panel */}
+              {adminTab === 'tournaments' && (
               <div className="panel-form">
                 <div className="archived-header">
                   <h3>Archived Tournaments</h3>
@@ -2677,6 +4282,9 @@ function App() {
                         <div className="admin-list-item" key={tournament.id}>
                           <div>
                             <strong>{tournament.name}</strong>
+                            {tournament.eventName ? (
+                              <p className="event-name-line">{tournament.eventName}</p>
+                            ) : null}
                             <p>
                               {getModeLabel(tournament.mode)} · {getEventTypeLabel(tournament.eventType)} ·{' '}
                               {getMatchFormatLabel(tournament.matchFormat)} · {tournament.eventDate ?? 'No date'}
@@ -2687,7 +4295,8 @@ function App() {
                               className="secondary-button"
                               type="button"
                               onClick={() => {
-                                const url = `${window.location.origin}${window.location.pathname}?tournamentId=${tournament.id}`;
+                                const shareId = tournament.eventGroupId ?? tournament.id;
+                                const url = `${window.location.origin}${window.location.pathname}?tournamentId=${shareId}`;
                                 copyToClipboard(url).then(() => {
                                   setStatusMessage('🔗 Share link copied to clipboard!');
                                 }).catch(() => {
@@ -2712,7 +4321,9 @@ function App() {
                   </div>
                 )}
               </div>
+              )}
 
+              {adminTab === 'players' && (
               <div className="panel-form">
                 <h3>Player Management</h3>
                 <div className="admin-list">
@@ -2738,6 +4349,42 @@ function App() {
                   )}
                 </div>
               </div>
+              )}
+
+              {adminTab === 'teams' && (
+              <div className="panel-form">
+                <h3>Team Management</h3>
+                <div className="admin-list">
+                  {manageableTeams.length === 0 ? (
+                    <p>No teams available.</p>
+                  ) : (
+                    manageableTeams.map((team) => {
+                      const memberNames = getTeamMemberNames(team.id);
+                      return (
+                        <div className="admin-list-item" key={team.id}>
+                          <div>
+                            <strong>{team.name}</strong>
+                            <p>
+                              {memberNames.length
+                                ? memberNames.join(' · ')
+                                : 'No members'}
+                            </p>
+                          </div>
+                          <button
+                            className="danger-button"
+                            onClick={() => void deleteTeam(team.id)}
+                            type="button"
+                            disabled={saving}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+              )}
             </div>
           </div>
         </section>
@@ -2882,6 +4529,10 @@ function App() {
           </div>
         </div>
       )}
+
+      {renderTeamBattleScoringModal()}
+      {renderStandardMatchScoringModal()}
+      {renderRoundRobinRosterModal()}
     </div>
   );
 }
