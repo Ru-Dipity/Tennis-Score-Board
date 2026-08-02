@@ -88,6 +88,10 @@ type TeamBattleAccumulator = {
   gamesLost: number;
 };
 
+/**
+ * The next power of two at or above a value (the bracket size a knockout draw
+ * must be padded to so every round after round 1 is a full pairing).
+ */
 export function nextPowerOfTwo(value: number) {
   if (value <= 1) {
     return 1;
@@ -99,6 +103,35 @@ export function nextPowerOfTwo(value: number) {
   }
 
   return size;
+}
+
+/**
+ * Back-calculates how many first-round BYEs a draw needs for a given number
+ * of participants: the bracket is padded up to the next power of two and the
+ * difference becomes round-1 BYEs. This guarantees round 1 (including BYE
+ * auto-advances) starts with exactly 2^n participants, so every later round
+ * halves cleanly and never needs a BYE.
+ */
+export function getKnockoutByeCount(participantCount: number) {
+  const safeCount = Math.max(2, Math.floor(participantCount || 2));
+  return Math.max(nextPowerOfTwo(safeCount), 2) - safeCount;
+}
+
+/**
+ * Picks the round-1 slots that receive BYEs. The slots are spread evenly
+ * between the top and bottom halves of the draw (outer edges first) while
+ * never placing two BYEs into the same round-1 match.
+ */
+export function getKnockoutByeSlots(bracketSize: number, byeCount: number) {
+  const slots = new Set<number>();
+  const topCount = Math.ceil(byeCount / 2);
+  for (let index = 0; index < topCount; index += 1) {
+    slots.add(1 + index * 2);
+  }
+  for (let index = 0; index < byeCount - topCount; index += 1) {
+    slots.add(bracketSize - index * 2);
+  }
+  return slots;
 }
 
 export function getBestOf(matchFormat: MatchFormat) {
@@ -119,43 +152,72 @@ export function createEmptyScoreInputs(matchFormat: MatchFormat) {
   return Array.from({ length: getBestOf(matchFormat) }, () => '');
 }
 
-export function createRoundLabels(bracketSize: number, customLabels: string[] = []) {
-  const rounds = Math.log2(bracketSize);
-  const labels: string[] = [];
-
-  for (let round = 0; round < rounds; round += 1) {
-    const remaining = bracketSize / 2 ** round;
-
-    if (customLabels[round]?.trim()) {
-      labels.push(customLabels[round].trim());
-      continue;
-    }
-
-    if (remaining === 2) {
-      labels.push('Final');
-    } else if (remaining === 4) {
-      labels.push('Semifinal');
-    } else if (remaining === 8) {
-      labels.push('Quarterfinal');
-    } else if (remaining === 16) {
-      labels.push('Round of 16');
-    } else if (remaining === 32) {
-      labels.push('Round of 32');
-    } else {
-      labels.push(`Round of ${remaining}`);
-    }
-  }
-
-  return labels;
+/**
+ * Resolve the knockout match that a completed match's winner advances to.
+ * The bracket maps match N in round R to match ceil(N/2) in round R+1.
+ */
+export function getKnockoutSuccessor(current: {
+  roundNumber: number;
+  matchNumber: number;
+}) {
+  return {
+    roundNumber: current.roundNumber + 1,
+    matchNumber: Math.ceil(current.matchNumber / 2),
+  };
 }
 
-export function shuffleSelectedParticipants(items: string[]) {
-  const shuffled = [...items];
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+/** A score line is confirmable only when it evaluates to a valid winner. */
+export function isMatchScoreValid(
+  participantAInputs: Array<string | number | null | undefined>,
+  participantBInputs: Array<string | number | null | undefined>,
+  matchFormat: MatchFormat,
+) {
+  return evaluateMatchScore(participantAInputs, participantBInputs, matchFormat) !== null;
+}
+
+/** Human-readable status label for a match. */
+export function getMatchStatusLabel(status: MatchStatus) {
+  switch (status) {
+    case 'COMPLETED':
+      return 'Completed';
+    case 'IN_PROGRESS':
+      return 'In Progress';
+    default:
+      return 'Pending';
   }
-  return shuffled;
+}
+
+function roundLabelForRemaining(remaining: number) {
+  if (remaining === 2) {
+    return 'Final';
+  }
+  if (remaining === 4) {
+    return 'Semifinal';
+  }
+  if (remaining === 8) {
+    return 'Quarterfinal';
+  }
+  if (remaining === 16) {
+    return 'Round of 16';
+  }
+  if (remaining === 32) {
+    return 'Round of 32';
+  }
+  return `Round of ${remaining}`;
+}
+
+export function createRoundLabels(bracketSize: number, customLabels: string[] = []) {
+  const labels: string[] = [];
+  let remaining = Math.max(2, Math.floor(bracketSize || 2));
+  let round = 0;
+  while (remaining >= 2) {
+    labels.push(
+      customLabels[round]?.trim() ? customLabels[round].trim() : roundLabelForRemaining(remaining),
+    );
+    remaining /= 2;
+    round += 1;
+  }
+  return labels;
 }
 
 function getStandardCategory(eventType: EventType): MatchCategory {
@@ -179,24 +241,31 @@ function defaultTeamLabel(index: number) {
 }
 
 export function buildKnockoutPlan(
-  participants: ParticipantSeed[],
+  participantCount: number,
   customLabels: string[] = [],
   matchFormat: MatchFormat = 'BEST_OF_3',
   eventType: EventType = 'SINGLES',
 ) {
-  const bracketSize = nextPowerOfTwo(participants.length);
+  // Hard BYE rule: BYEs are only placed in round 1. The participant count is
+  // padded up to the next power of two and the difference becomes first-round
+  // BYEs, so round 1 always starts with exactly 2^n participants (BYE
+  // auto-advances included) and every later round is a full power-of-two
+  // pairing — a BYE can never be generated after round 1.
+  const participantCountSafe = Math.max(2, Math.floor(participantCount || 2));
+  const bracketSize = Math.max(nextPowerOfTwo(participantCountSafe), 2);
+  const byeCount = bracketSize - participantCountSafe;
+  const byeSlots = getKnockoutByeSlots(bracketSize, byeCount);
   const roundLabels = createRoundLabels(bracketSize, customLabels);
 
   const entries: EntryPlan[] = Array.from({ length: bracketSize }, (_, index) => {
-    const participant = participants[index];
+    const slotNumber = index + 1;
+    const isBye = byeSlots.has(slotNumber);
     return {
-      seed: index + 1,
-      entryName: participant?.displayName ?? 'BYE',
-      participantType: participant?.participantType ?? 'PLAYER',
-      playerId: participant?.playerId,
-      teamId: participant?.teamId,
-      slotNumber: index + 1,
-      isBye: !participant,
+      seed: slotNumber,
+      entryName: isBye ? 'BYE' : 'TBD',
+      participantType: 'PLAYER' as const,
+      slotNumber,
+      isBye,
     };
   });
 
@@ -204,9 +273,12 @@ export function buildKnockoutPlan(
   const matches: MatchPlan[] = [];
   let displayOrder = 1;
 
+  // Round 1: pair slots (1,2), (3,4), ... A match whose pair contains a BYE
+  // slot is a BYE match (score 'BYE'); the real side auto-advances later.
   for (let matchIndex = 0; matchIndex < bracketSize / 2; matchIndex += 1) {
     const entryA = entries[matchIndex * 2];
     const entryB = entries[matchIndex * 2 + 1];
+    const isByeMatch = entryA.isBye || entryB.isBye;
     const match: MatchPlan = {
       stage: 'KNOCKOUT',
       status: 'PENDING',
@@ -215,24 +287,21 @@ export function buildKnockoutPlan(
       matchNumber: matchIndex + 1,
       displayOrder,
       participantASeeds: entryA.isBye ? undefined : [entryA.seed],
-      participantAName: entryA.isBye ? undefined : entryA.entryName,
+      participantAName: entryA.isBye ? 'BYE' : undefined,
       participantBSeeds: entryB.isBye ? undefined : [entryB.seed],
-      participantBName: entryB.isBye ? undefined : entryB.entryName,
+      participantBName: entryB.isBye ? 'BYE' : undefined,
+      score: isByeMatch ? 'BYE' : undefined,
       matchFormat,
       matchCategory: getStandardCategory(eventType),
     };
-
-    if (entryA.isBye !== entryB.isBye) {
-      match.status = 'COMPLETED';
-      match.score = 'BYE';
-      match.winnerSeeds = entryA.isBye ? [entryB.seed] : [entryA.seed];
-      match.winnerSide = entryA.isBye ? 'B' : 'A';
-    }
 
     matches.push(match);
     displayOrder += 1;
   }
 
+  // Later rounds: a perfect binary tree fed by the winners of the previous
+  // round. The bracket is a power of two, so every match here pairs two real
+  // advancing participants — no BYE is ever generated in rounds 2 and beyond.
   let previousRoundMatches = matches.filter((match) => match.roundNumber === 1);
   for (let roundNumber = 2; roundNumber <= roundLabels.length; roundNumber += 1) {
     const currentRoundMatches: MatchPlan[] = [];
@@ -271,13 +340,88 @@ export function buildKnockoutPlan(
   };
 }
 
+export type KnockoutByeValidation = {
+  valid: boolean;
+  errors: string[];
+};
+
+/**
+ * Rule-compliance checker for the knockout BYE rule. Verifies that every BYE
+ * in a generated plan lives in round 1, that round 1 forms a power-of-two
+ * draw (participants + BYEs = 2^n), that no match has BYE on both sides, and
+ * that every later round is a full pairing with no BYE.
+ */
+export function validateKnockoutByeRule(plan: {
+  bracketSize: number;
+  entries: EntryPlan[];
+  matches: MatchPlan[];
+}): KnockoutByeValidation {
+  const errors: string[] = [];
+  const { bracketSize, entries, matches } = plan;
+
+  const isPowerOfTwo = bracketSize >= 2 && (bracketSize & (bracketSize - 1)) === 0;
+  if (!isPowerOfTwo) {
+    errors.push(`bracketSize ${bracketSize} is not a power of two.`);
+  }
+
+  const byeEntryCount = entries.filter((entry) => entry.isBye).length;
+  const participantCount = bracketSize - byeEntryCount;
+  if (getKnockoutByeCount(participantCount) !== byeEntryCount) {
+    errors.push(
+      `BYE count (${byeEntryCount}) does not match the round-1 formula for ${participantCount} participants.`,
+    );
+  }
+
+  const rounds = new Map<number, number>();
+  const expectedRoundOneMatches = bracketSize / 2;
+  for (const match of matches) {
+    const hasBye =
+      match.score === 'BYE' ||
+      match.participantAName === 'BYE' ||
+      match.participantBName === 'BYE';
+    if (hasBye) {
+      if (match.roundNumber !== 1) {
+        errors.push(
+          `Round ${match.roundNumber} match ${match.matchNumber} contains a BYE — BYEs are only allowed in round 1.`,
+        );
+      } else if (match.participantAName === 'BYE' && match.participantBName === 'BYE') {
+        errors.push(`Round 1 match ${match.matchNumber} has BYE on both sides.`);
+      }
+    }
+    rounds.set(match.roundNumber, (rounds.get(match.roundNumber) ?? 0) + 1);
+  }
+
+  const roundNumbers = [...rounds.keys()].sort((a, b) => a - b);
+  for (const roundNumber of roundNumbers) {
+    const expected = roundNumber === 1 ? expectedRoundOneMatches : bracketSize / 2 ** roundNumber;
+    const actual = rounds.get(roundNumber) ?? 0;
+    if (actual !== expected) {
+      errors.push(
+        `Round ${roundNumber} should contain ${expected} matches, got ${actual} (later rounds must be full pairings).`,
+      );
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
 export function buildRoundRobinPlan(
   participants: ParticipantSeed[],
   groupCount: number,
   matchFormat: MatchFormat = 'BEST_OF_3',
   eventType: EventType = 'SINGLES',
+  playersPerGroup?: number,
 ) {
-  const safeGroupCount = Math.max(1, Math.min(groupCount, participants.length));
+  // When the tournament creation flow configures a per-group size, every
+  // group is created with exactly that many slots (participants fill the
+  // first slots round-robin, the rest become TBD placeholders) so a concrete
+  // all-against-all schedule exists up front. Without the parameter the
+  // legacy behavior is preserved: the group count is clamped by the real
+  // participant count and no placeholder slots are generated.
+  const hasExplicitGroupSize = playersPerGroup !== undefined && Number.isFinite(playersPerGroup);
+  const safeGroupCount = hasExplicitGroupSize
+    ? Math.max(1, Math.floor(groupCount || 1))
+    : Math.max(1, Math.min(groupCount, participants.length));
   const groupNames = Array.from({ length: safeGroupCount }, (_, index) =>
     String.fromCharCode(65 + index),
   );
@@ -290,25 +434,31 @@ export function buildRoundRobinPlan(
     groups.get(groupName)?.push(participant);
   });
 
+  const slotCountPerGroup = hasExplicitGroupSize
+    ? Math.max(1, Math.floor(playersPerGroup as number))
+    : 0;
+
   let seed = 1;
   const entries: EntryPlan[] = [];
   const matches: MatchPlan[] = [];
 
   for (const groupName of groupNames) {
     const members = groups.get(groupName) ?? [];
-    members.forEach((participant, index) => {
+    const slotCount = hasExplicitGroupSize ? slotCountPerGroup : members.length;
+    for (let index = 0; index < slotCount; index += 1) {
+      const member = members[index];
       entries.push({
         seed,
-        entryName: participant.displayName,
-        participantType: participant.participantType,
-        playerId: participant.playerId,
-        teamId: participant.teamId,
+        entryName: member?.displayName ?? 'TBD',
+        participantType: member?.participantType ?? ('PLAYER' as const),
+        playerId: member?.playerId,
+        teamId: member?.teamId,
         groupName,
         slotNumber: index + 1,
         isBye: false,
       });
       seed += 1;
-    });
+    }
   }
 
   let matchNumber = 1;
@@ -344,32 +494,35 @@ export function buildRoundRobinPlan(
     groupNames,
     entries,
     matches,
+    playersPerGroup: hasExplicitGroupSize ? slotCountPerGroup : undefined,
   };
 }
 
 export function buildTeamBattlePlan(
   participants: ParticipantSeed[],
   teamCount: number,
-  teamSize: number,
-  teamLabels: string[],
+  singlesPerDuel: number,
+  doublesPerDuel: number,
   matchFormat: MatchFormat = 'BEST_OF_3',
 ) {
   if (teamCount < 2) {
     throw new Error('Team battle requires at least 2 teams.');
   }
 
-  if (participants.length !== teamCount * teamSize) {
-    throw new Error('Selected players must exactly match teamCount x teamSize.');
+  if (singlesPerDuel < 1) {
+    throw new Error('Team battle requires at least 1 singles match per duel.');
   }
 
-  if (teamSize < 2 || teamSize % 2 !== 0) {
-    throw new Error('Team battle currently requires an even team size of at least 2.');
+  if (doublesPerDuel < 1) {
+    throw new Error('Team battle requires at least 1 doubles match per duel.');
   }
 
-  const resolvedLabels =
-    teamLabels.filter((label) => label.trim()).length === teamCount
-      ? teamLabels.map((label) => label.trim())
-      : Array.from({ length: teamCount }, (_, index) => defaultTeamLabel(index));
+  const resolvedLabels = Array.from({ length: teamCount }, (_, index) => defaultTeamLabel(index));
+
+  // Roster slots per team: large enough to seed every singles slot and every
+  // doubles pairing (index i pairs with index i + doublesPerDuel). Lineups are
+  // later replaced with actual team members when an admin binds a system team.
+  const rosterSize = Math.max(singlesPerDuel, doublesPerDuel * 2);
 
   const entries: EntryPlan[] = [];
   const teamBuckets: EntryPlan[][] = [];
@@ -377,17 +530,21 @@ export function buildTeamBattlePlan(
 
   for (let teamIndex = 0; teamIndex < teamCount; teamIndex += 1) {
     const label = resolvedLabels[teamIndex];
-    const members = participants.slice(teamIndex * teamSize, (teamIndex + 1) * teamSize);
-    const teamEntries = members.map((participant, memberIndex) => ({
-      seed: seed + memberIndex,
-      entryName: participant.displayName,
-      participantType: 'PLAYER' as const,
-      playerId: participant.playerId,
-      groupName: label,
-      slotNumber: memberIndex + 1,
-      isBye: false,
-      teamOrder: memberIndex + 1,
-    }));
+    const members = participants.slice(teamIndex * rosterSize, (teamIndex + 1) * rosterSize);
+    // Always create rosterSize slots per team; empty slots become TBD placeholders.
+    const teamEntries: EntryPlan[] = Array.from({ length: rosterSize }, (_, memberIndex) => {
+      const participant = members[memberIndex];
+      return {
+        seed: seed + memberIndex,
+        entryName: participant?.displayName ?? 'TBD',
+        participantType: 'PLAYER' as const,
+        playerId: participant?.playerId,
+        groupName: label,
+        slotNumber: memberIndex + 1,
+        isBye: false,
+        teamOrder: memberIndex + 1,
+      };
+    });
 
     entries.push(...teamEntries);
     teamBuckets.push(teamEntries);
@@ -404,7 +561,7 @@ export function buildTeamBattlePlan(
       const teamB = teamBuckets[teamBIndex];
       const duelLabel = `${resolvedLabels[teamAIndex]} vs ${resolvedLabels[teamBIndex]}`;
 
-      for (let index = 0; index < teamSize; index += 1) {
+      for (let index = 0; index < singlesPerDuel; index += 1) {
         matches.push({
           stage: 'TEAM_BATTLE',
           status: 'PENDING',
@@ -426,10 +583,15 @@ export function buildTeamBattlePlan(
         displayOrder += 1;
       }
 
-      const pairCount = teamSize / 2;
-      for (let index = 0; index < pairCount; index += 1) {
-        const participantASeeds = [teamA[index].seed, teamA[index + pairCount].seed];
-        const participantBSeeds = [teamB[index].seed, teamB[index + pairCount].seed];
+      for (let index = 0; index < doublesPerDuel; index += 1) {
+        const participantASeeds = [
+          teamA[index].seed,
+          teamA[index + doublesPerDuel].seed,
+        ];
+        const participantBSeeds = [
+          teamB[index].seed,
+          teamB[index + doublesPerDuel].seed,
+        ];
 
         matches.push({
           stage: 'TEAM_BATTLE',
@@ -440,9 +602,9 @@ export function buildTeamBattlePlan(
           displayOrder,
           groupName: 'Doubles',
           participantASeeds,
-          participantAName: `${teamA[index].entryName} / ${teamA[index + pairCount].entryName}`,
+          participantAName: `${teamA[index].entryName} / ${teamA[index + doublesPerDuel].entryName}`,
           participantBSeeds,
-          participantBName: `${teamB[index].entryName} / ${teamB[index + pairCount].entryName}`,
+          participantBName: `${teamB[index].entryName} / ${teamB[index + doublesPerDuel].entryName}`,
           matchFormat,
           matchCategory: 'TEAM_DOUBLES',
           participantATeamLabel: resolvedLabels[teamAIndex],
