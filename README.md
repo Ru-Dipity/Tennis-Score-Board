@@ -79,9 +79,15 @@ flowchart LR
 ## 🎯 Application Features
 
 ### 🏆 Tournament Modes
+
+![Tournament Display 1](./public/images/Tournament%20Display%201.png)
+
+![Tournament Display 2](./public/images/Tournament%20Display%202.png)
 - **Knockout (Single Elimination)** — Automatic bracket generation with seeded draws, bye handling, and winner propagation.
 - **Round Robin** — Group-stage standings with configurable group count and **per-group player limit**, a real-time match matrix, and click-to-score cells. Supports **singles** (per-slot player dropdowns) and **doubles** (two-player roster modal) entry assignment with live sync to every group match.
 - **Team Battle** — Responsive team-vs-team match panels with lineup editor and mobile/tablet-optimized CSS Flex/Grid layouts.
+
+![Admin Management](./public/images/Admin%20Management.png)
 
 ### 🎲 Match Management
 - **Singles & Doubles** support with player and team registration.
