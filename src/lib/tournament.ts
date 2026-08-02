@@ -88,6 +88,10 @@ type TeamBattleAccumulator = {
   gamesLost: number;
 };
 
+/**
+ * The next power of two at or above a value (the bracket size a knockout draw
+ * must be padded to so every round after round 1 is a full pairing).
+ */
 export function nextPowerOfTwo(value: number) {
   if (value <= 1) {
     return 1;
@@ -99,6 +103,35 @@ export function nextPowerOfTwo(value: number) {
   }
 
   return size;
+}
+
+/**
+ * Back-calculates how many first-round BYEs a draw needs for a given number
+ * of participants: the bracket is padded up to the next power of two and the
+ * difference becomes round-1 BYEs. This guarantees round 1 (including BYE
+ * auto-advances) starts with exactly 2^n participants, so every later round
+ * halves cleanly and never needs a BYE.
+ */
+export function getKnockoutByeCount(participantCount: number) {
+  const safeCount = Math.max(2, Math.floor(participantCount || 2));
+  return Math.max(nextPowerOfTwo(safeCount), 2) - safeCount;
+}
+
+/**
+ * Picks the round-1 slots that receive BYEs. The slots are spread evenly
+ * between the top and bottom halves of the draw (outer edges first) while
+ * never placing two BYEs into the same round-1 match.
+ */
+export function getKnockoutByeSlots(bracketSize: number, byeCount: number) {
+  const slots = new Set<number>();
+  const topCount = Math.ceil(byeCount / 2);
+  for (let index = 0; index < topCount; index += 1) {
+    slots.add(1 + index * 2);
+  }
+  for (let index = 0; index < byeCount - topCount; index += 1) {
+    slots.add(bracketSize - index * 2);
+  }
+  return slots;
 }
 
 export function getBestOf(matchFormat: MatchFormat) {
@@ -154,33 +187,36 @@ export function getMatchStatusLabel(status: MatchStatus) {
   }
 }
 
-export function createRoundLabels(bracketSize: number, customLabels: string[] = []) {
-  const rounds = Math.log2(bracketSize);
-  const labels: string[] = [];
-
-  for (let round = 0; round < rounds; round += 1) {
-    const remaining = bracketSize / 2 ** round;
-
-    if (customLabels[round]?.trim()) {
-      labels.push(customLabels[round].trim());
-      continue;
-    }
-
-    if (remaining === 2) {
-      labels.push('Final');
-    } else if (remaining === 4) {
-      labels.push('Semifinal');
-    } else if (remaining === 8) {
-      labels.push('Quarterfinal');
-    } else if (remaining === 16) {
-      labels.push('Round of 16');
-    } else if (remaining === 32) {
-      labels.push('Round of 32');
-    } else {
-      labels.push(`Round of ${remaining}`);
-    }
+function roundLabelForRemaining(remaining: number) {
+  if (remaining === 2) {
+    return 'Final';
   }
+  if (remaining === 4) {
+    return 'Semifinal';
+  }
+  if (remaining === 8) {
+    return 'Quarterfinal';
+  }
+  if (remaining === 16) {
+    return 'Round of 16';
+  }
+  if (remaining === 32) {
+    return 'Round of 32';
+  }
+  return `Round of ${remaining}`;
+}
 
+export function createRoundLabels(bracketSize: number, customLabels: string[] = []) {
+  const labels: string[] = [];
+  let remaining = Math.max(2, Math.floor(bracketSize || 2));
+  let round = 0;
+  while (remaining >= 2) {
+    labels.push(
+      customLabels[round]?.trim() ? customLabels[round].trim() : roundLabelForRemaining(remaining),
+    );
+    remaining /= 2;
+    round += 1;
+  }
   return labels;
 }
 
@@ -205,38 +241,40 @@ function defaultTeamLabel(index: number) {
 }
 
 export function buildKnockoutPlan(
-  firstRoundMatches: number,
+  participantCount: number,
   customLabels: string[] = [],
   matchFormat: MatchFormat = 'BEST_OF_3',
   eventType: EventType = 'SINGLES',
 ) {
-  // The admin defines the first-round match count; that defines the number of
-  // participants who play in round 1. The bracket is padded up to the next
-  // power of two, and empty slots become BYEs placed from the bracket edges
-  // inward so both halves of the draw receive them evenly (standard draw rules).
-  const firstRoundParticipantCount = Math.max(1, Math.floor(firstRoundMatches || 1)) * 2;
-  const bracketSize = Math.max(nextPowerOfTwo(firstRoundParticipantCount), 2);
+  // Hard BYE rule: BYEs are only placed in round 1. The participant count is
+  // padded up to the next power of two and the difference becomes first-round
+  // BYEs, so round 1 always starts with exactly 2^n participants (BYE
+  // auto-advances included) and every later round is a full power-of-two
+  // pairing — a BYE can never be generated after round 1.
+  const participantCountSafe = Math.max(2, Math.floor(participantCount || 2));
+  const bracketSize = Math.max(nextPowerOfTwo(participantCountSafe), 2);
+  const byeCount = bracketSize - participantCountSafe;
+  const byeSlots = getKnockoutByeSlots(bracketSize, byeCount);
   const roundLabels = createRoundLabels(bracketSize, customLabels);
 
-  const byeCount = bracketSize - firstRoundParticipantCount;
-  const byeSlots = new Set<number>();
-  for (let index = 0; index < byeCount; index += 1) {
-    const offset = Math.floor(index / 2);
-    byeSlots.add(index % 2 === 0 ? offset + 1 : bracketSize - offset);
-  }
-
-  const entries: EntryPlan[] = Array.from({ length: bracketSize }, (_, index) => ({
-    seed: index + 1,
-    entryName: byeSlots.has(index + 1) ? 'BYE' : 'TBD',
-    participantType: 'PLAYER' as const,
-    slotNumber: index + 1,
-    isBye: byeSlots.has(index + 1),
-  }));
+  const entries: EntryPlan[] = Array.from({ length: bracketSize }, (_, index) => {
+    const slotNumber = index + 1;
+    const isBye = byeSlots.has(slotNumber);
+    return {
+      seed: slotNumber,
+      entryName: isBye ? 'BYE' : 'TBD',
+      participantType: 'PLAYER' as const,
+      slotNumber,
+      isBye,
+    };
+  });
 
   const entryNames = seedNameMap(entries);
   const matches: MatchPlan[] = [];
   let displayOrder = 1;
 
+  // Round 1: pair slots (1,2), (3,4), ... A match whose pair contains a BYE
+  // slot is a BYE match (score 'BYE'); the real side auto-advances later.
   for (let matchIndex = 0; matchIndex < bracketSize / 2; matchIndex += 1) {
     const entryA = entries[matchIndex * 2];
     const entryB = entries[matchIndex * 2 + 1];
@@ -261,6 +299,9 @@ export function buildKnockoutPlan(
     displayOrder += 1;
   }
 
+  // Later rounds: a perfect binary tree fed by the winners of the previous
+  // round. The bracket is a power of two, so every match here pairs two real
+  // advancing participants — no BYE is ever generated in rounds 2 and beyond.
   let previousRoundMatches = matches.filter((match) => match.roundNumber === 1);
   for (let roundNumber = 2; roundNumber <= roundLabels.length; roundNumber += 1) {
     const currentRoundMatches: MatchPlan[] = [];
@@ -299,13 +340,88 @@ export function buildKnockoutPlan(
   };
 }
 
+export type KnockoutByeValidation = {
+  valid: boolean;
+  errors: string[];
+};
+
+/**
+ * Rule-compliance checker for the knockout BYE rule. Verifies that every BYE
+ * in a generated plan lives in round 1, that round 1 forms a power-of-two
+ * draw (participants + BYEs = 2^n), that no match has BYE on both sides, and
+ * that every later round is a full pairing with no BYE.
+ */
+export function validateKnockoutByeRule(plan: {
+  bracketSize: number;
+  entries: EntryPlan[];
+  matches: MatchPlan[];
+}): KnockoutByeValidation {
+  const errors: string[] = [];
+  const { bracketSize, entries, matches } = plan;
+
+  const isPowerOfTwo = bracketSize >= 2 && (bracketSize & (bracketSize - 1)) === 0;
+  if (!isPowerOfTwo) {
+    errors.push(`bracketSize ${bracketSize} is not a power of two.`);
+  }
+
+  const byeEntryCount = entries.filter((entry) => entry.isBye).length;
+  const participantCount = bracketSize - byeEntryCount;
+  if (getKnockoutByeCount(participantCount) !== byeEntryCount) {
+    errors.push(
+      `BYE count (${byeEntryCount}) does not match the round-1 formula for ${participantCount} participants.`,
+    );
+  }
+
+  const rounds = new Map<number, number>();
+  const expectedRoundOneMatches = bracketSize / 2;
+  for (const match of matches) {
+    const hasBye =
+      match.score === 'BYE' ||
+      match.participantAName === 'BYE' ||
+      match.participantBName === 'BYE';
+    if (hasBye) {
+      if (match.roundNumber !== 1) {
+        errors.push(
+          `Round ${match.roundNumber} match ${match.matchNumber} contains a BYE — BYEs are only allowed in round 1.`,
+        );
+      } else if (match.participantAName === 'BYE' && match.participantBName === 'BYE') {
+        errors.push(`Round 1 match ${match.matchNumber} has BYE on both sides.`);
+      }
+    }
+    rounds.set(match.roundNumber, (rounds.get(match.roundNumber) ?? 0) + 1);
+  }
+
+  const roundNumbers = [...rounds.keys()].sort((a, b) => a - b);
+  for (const roundNumber of roundNumbers) {
+    const expected = roundNumber === 1 ? expectedRoundOneMatches : bracketSize / 2 ** roundNumber;
+    const actual = rounds.get(roundNumber) ?? 0;
+    if (actual !== expected) {
+      errors.push(
+        `Round ${roundNumber} should contain ${expected} matches, got ${actual} (later rounds must be full pairings).`,
+      );
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
 export function buildRoundRobinPlan(
   participants: ParticipantSeed[],
   groupCount: number,
   matchFormat: MatchFormat = 'BEST_OF_3',
   eventType: EventType = 'SINGLES',
+  playersPerGroup?: number,
 ) {
-  const safeGroupCount = Math.max(1, Math.min(groupCount, participants.length));
+  // When the tournament creation flow configures a per-group size, every
+  // group is created with exactly that many slots (participants fill the
+  // first slots round-robin, the rest become TBD placeholders) so a concrete
+  // all-against-all schedule exists up front. Without the parameter the
+  // legacy behavior is preserved: the group count is clamped by the real
+  // participant count and no placeholder slots are generated.
+  const hasExplicitGroupSize = playersPerGroup !== undefined && Number.isFinite(playersPerGroup);
+  const safeGroupCount = hasExplicitGroupSize
+    ? Math.max(1, Math.floor(groupCount || 1))
+    : Math.max(1, Math.min(groupCount, participants.length));
   const groupNames = Array.from({ length: safeGroupCount }, (_, index) =>
     String.fromCharCode(65 + index),
   );
@@ -318,25 +434,31 @@ export function buildRoundRobinPlan(
     groups.get(groupName)?.push(participant);
   });
 
+  const slotCountPerGroup = hasExplicitGroupSize
+    ? Math.max(1, Math.floor(playersPerGroup as number))
+    : 0;
+
   let seed = 1;
   const entries: EntryPlan[] = [];
   const matches: MatchPlan[] = [];
 
   for (const groupName of groupNames) {
     const members = groups.get(groupName) ?? [];
-    members.forEach((participant, index) => {
+    const slotCount = hasExplicitGroupSize ? slotCountPerGroup : members.length;
+    for (let index = 0; index < slotCount; index += 1) {
+      const member = members[index];
       entries.push({
         seed,
-        entryName: participant.displayName,
-        participantType: participant.participantType,
-        playerId: participant.playerId,
-        teamId: participant.teamId,
+        entryName: member?.displayName ?? 'TBD',
+        participantType: member?.participantType ?? ('PLAYER' as const),
+        playerId: member?.playerId,
+        teamId: member?.teamId,
         groupName,
         slotNumber: index + 1,
         isBye: false,
       });
       seed += 1;
-    });
+    }
   }
 
   let matchNumber = 1;
@@ -372,6 +494,7 @@ export function buildRoundRobinPlan(
     groupNames,
     entries,
     matches,
+    playersPerGroup: hasExplicitGroupSize ? slotCountPerGroup : undefined,
   };
 }
 

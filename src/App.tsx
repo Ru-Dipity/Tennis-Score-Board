@@ -1,5 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { Bracket } from 'react-brackets';
+import type { IRoundProps, IRenderSeedProps, ISeedProps } from 'react-brackets';
 import {
   getCurrentUser,
   signIn,
@@ -121,6 +124,205 @@ function groupKnockoutRounds(tournamentMatches: Match[]) {
   return Array.from(roundMap.entries()).sort(([left], [right]) => left - right);
 }
 
+// 轮次标题 → 顶部导航短标签：Round of 16 → R16、Quarterfinal → QF 等。
+function shortRoundLabel(title: string): string {
+  const ofMatch = title.match(/round\s+of\s+(\d+)/i);
+  if (ofMatch) {
+    return `R${ofMatch[1]}`;
+  }
+  const lower = title.toLowerCase();
+  if (lower.includes('quarterfinal')) return 'QF';
+  if (lower.includes('semifinal')) return 'SF';
+  if (lower.includes('final')) return 'F';
+  return title;
+}
+
+// 标准单侧树形淘汰赛对阵图（react-brackets 标准化渲染）。
+// 卡片布局由库的 Bracket 核心组件负责；晋级连线由独立的 SVG 层绘制：
+// 通过实测每张卡片的位置，把折线精准锚定在左侧卡片的右侧中点与右侧
+// 卡片的左侧中点之间（连线层 z-index: 0，卡片 z-index: 10），彻底避免
+// 连线与卡片重叠、穿透或断档。卡片内容通过 renderCard 由父级传入（内部
+// 复用现有 renderBracketMatchCard，点击提交比分等业务逻辑原样保留），
+// Match 数据结构不做任何改动。
+function KnockoutBracket({
+  matches,
+  renderCard,
+}: {
+  matches: Match[];
+  renderCard: (match: Match, finalMatch: Match | undefined) => ReactNode;
+}) {
+  const grouped = groupKnockoutRounds(matches);
+  const totalRounds = grouped.length;
+  const finalMatch = totalRounds > 0 ? grouped[totalRounds - 1][1][0] : undefined;
+
+  // 构造库所需的 rounds 数据：每轮一个 IRoundProps，seeds 按 matchNumber
+  // 升序排列（与赛程树形顺序一致），并在每个 seed 上挂载原始 match 与
+  // 决赛引用，供自定义比赛卡片渲染使用。
+  const rounds: IRoundProps[] = grouped.map(([round, roundMatches]) => ({
+    title: roundMatches[0]?.roundLabel ?? `Round ${round}`,
+    seeds: roundMatches.map((match) => ({
+      id: match.id,
+      teams: [
+        { name: match.participantAName || 'TBD' },
+        { name: match.participantBName || 'TBD' },
+      ],
+      match,
+      finalMatch,
+    })),
+  }));
+
+  // 轮次标识（用于连线重测与导航的稳定 key）：各轮次比赛 id 序列。
+  const roundsKey = rounds.map((r) => r.seeds.map((s) => s.id).join(',')).join('|');
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [paths, setPaths] = useState<string[]>([]);
+  const [activeRound, setActiveRound] = useState<number | null>(null);
+
+  // 测量每张卡片的实际位置，生成“左卡右缘中点 → 右卡左缘中点”的
+  // 精准折线。列内卡片通过 flex 均分列高，天然处于两两汇聚的树形中点，
+  // 因此折线的垂直段总是落在两场前驱比赛的正中间。
+  useEffect(() => {
+    const inner = innerRef.current;
+    if (!inner) return;
+    const measure = () => {
+      const containerRect = inner.getBoundingClientRect();
+      const rects = new Map<
+        string,
+        { left: number; right: number; top: number; height: number }
+      >();
+      inner.querySelectorAll<HTMLElement>('.rb-seed').forEach((card) => {
+        const id = card.dataset.matchId;
+        if (!id) return;
+        const r = card.getBoundingClientRect();
+        rects.set(id, {
+          left: r.left - containerRect.left,
+          right: r.right - containerRect.left,
+          top: r.top - containerRect.top,
+          height: r.height,
+        });
+      });
+      const next: string[] = [];
+      rounds.forEach((round, ri) => {
+        if (ri === rounds.length - 1) return; // 最后一轮（决赛）没有后继
+        round.seeds.forEach((seed, si) => {
+          const successor = rounds[ri + 1].seeds[Math.floor(si / 2)];
+          const a = rects.get(String(seed.id));
+          const b = successor ? rects.get(String(successor.id)) : undefined;
+          if (!a || !b) return;
+          const x1 = a.right; // 左卡右缘
+          const y1 = a.top + a.height / 2; // 左卡右侧中点
+          const x2 = b.left; // 右卡左缘
+          const y2 = b.top + b.height / 2; // 右卡左侧中点
+          const xm = (x1 + x2) / 2; // 折线垂直段所在的 x
+          next.push(`M ${x1} ${y1} L ${xm} ${y1} L ${xm} ${y2} L ${x2} ${y2}`);
+        });
+      });
+      setPaths((prev) =>
+        prev.length === next.length && prev.every((p, i) => p === next[i]) ? prev : next,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(inner);
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready.then(measure).catch(() => {});
+    }
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roundsKey]);
+
+  // 点击轮次导航：把对应轮次列平滑滚动到视口最左，其余轮次自然向右延伸。
+  const scrollToRound = (index: number | null) => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl) return;
+    if (index === null) {
+      scrollEl.scrollTo({ left: 0, behavior: 'smooth' });
+      setActiveRound(null);
+      return;
+    }
+    const roundEl = scrollEl.querySelectorAll<HTMLElement>('.bracket-round')[index];
+    if (roundEl) {
+      roundEl.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
+    }
+    setActiveRound(index);
+  };
+
+  // 轮次标题：绿色胶囊，与项目既有视觉一致。
+  const renderRoundTitle = (title: string) => (
+    <span className="bracket-col-head">{title}</span>
+  );
+
+  // 自定义比赛卡片（Custom Match Card）：容器负责树形均分定位（flex 均分
+  // 列高，卡片自动处于两两汇聚的树形中点），内部完全复用父级传入的
+  // renderCard —— 点击提交比分等交互逻辑原样保留。
+  const renderMatchSeed = ({ seed }: IRenderSeedProps) => {
+    const match = (seed as ISeedProps & { match: Match }).match;
+    const final = (seed as ISeedProps & { match: Match; finalMatch: Match | undefined })
+      .finalMatch;
+    return (
+      <div className="rb-seed" data-match-id={match.id}>
+        {renderCard(match, final)}
+      </div>
+    );
+  };
+
+  // 顶部轮次导航胶囊：All + 各轮次短标签（R32 / R16 / QF / SF / F）。
+  const navItems = rounds.map((round, index) => ({
+    label: shortRoundLabel(round.title),
+    index,
+  }));
+
+  return (
+    <div className="bracket-wrap">
+      <div className="bracket-nav">
+        <button
+          type="button"
+          className={`bracket-nav-pill ${activeRound === null ? 'active' : ''}`}
+          onClick={() => scrollToRound(null)}
+        >
+          All
+        </button>
+        {navItems.map(({ label, index }) => (
+          <button
+            type="button"
+            key={`${label}-${index}`}
+            className={`bracket-nav-pill ${activeRound === index ? 'active' : ''}`}
+            onClick={() => scrollToRound(index)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="bracket-split" ref={scrollRef}>
+        <div className="bracket-inner" ref={innerRef}>
+          <Bracket
+            rounds={rounds}
+            mobileBreakpoint={0}
+            roundClassName="bracket-round"
+            renderSeedComponent={renderMatchSeed}
+            roundTitleComponent={renderRoundTitle}
+          />
+          <svg className="bracket-connectors" aria-hidden="true">
+            {paths.map((d, index) => (
+              <path key={index} d={d} className="bracket-connector-path" />
+            ))}
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// BYEs are only legal in round 1 of a knockout draw. If a stored match ever
+// carries a BYE in a later round (corrupt/legacy data), the UI must surface
+// and refuse to score it instead of silently rendering an invalid bracket.
+function hasIllegalKnockoutBye(match: Match) {
+  const hasBye =
+    match.score === 'BYE' || match.participantAName === 'BYE' || match.participantBName === 'BYE';
+  return hasBye && match.stage === 'KNOCKOUT' && match.roundNumber > 1;
+}
+
 function getParticipantEntryIds(match: Match, side: WinnerSide) {
   const entryIds =
     side === 'A' ? match.participantAEntryIds ?? [] : match.participantBEntryIds ?? [];
@@ -132,6 +334,24 @@ function getParticipantEntryIds(match: Match, side: WinnerSide) {
   }
 
   return singleEntryId ? [singleEntryId] : [];
+}
+
+// Find the round-robin group match wired between two slot entries (either
+// side order). Used by the matrix so a "Score pending" cell can open the
+// exact match in the scoring modal.
+function findGroupMatch<
+  TMatch extends {
+    groupName?: string | null;
+    participantAEntryId?: string | null;
+    participantBEntryId?: string | null;
+  },
+>(matches: TMatch[], groupName: string, entryIdA: string, entryIdB: string) {
+  return matches.find(
+    (item) =>
+      item.groupName === groupName &&
+      ((item.participantAEntryId === entryIdA && item.participantBEntryId === entryIdB) ||
+        (item.participantAEntryId === entryIdB && item.participantBEntryId === entryIdA)),
+  );
 }
 
 function getMatchDisplayScore(match: Match) {
@@ -217,7 +437,8 @@ function App() {
     matchFormat: 'BEST_OF_3' as MatchFormat,
     groupCount: 2,
     qualifyPerGroup: 2,
-    firstRoundMatches: 4,
+    playersPerGroup: 4,
+    knockoutParticipants: 8,
     teamCount: 2,
     singlesPerDuel: 4,
     doublesPerDuel: 2,
@@ -230,12 +451,22 @@ function App() {
   });
   // Team battle scoring modal: the match currently being scored in the popup.
   const [scoringMatch, setScoringMatch] = useState<Match | null>(null);
+  // Round-robin doubles roster modal: the group whose per-slot two-player
+  // lineups are currently being edited in the popup.
+  const [rrRoster, setRrRoster] = useState<{
+    tournamentId: string;
+    groupName: string;
+  } | null>(null);
   // Inline quick-create state for the bracket editor's "+ Create New" option.
+  // slotIndex is set when a doubles knockout slot (Player 1 / Player 2) was
+  // the source of the request, so the freshly created player replaces exactly
+  // that slot instead of the whole side.
   const [quickCreate, setQuickCreate] = useState<{
     matchId: string;
     side: WinnerSide;
     kind: 'PLAYER' | 'TEAM';
     name: string;
+    slotIndex?: number;
   } | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [saving, setSaving] = useState(false);
@@ -926,13 +1157,14 @@ function App() {
       return;
     }
 
-    // Knockout draws require the admin-defined first-round match count. The
-    // count drives the bracket size and automatic BYE placement.
+    // Knockout draws require the admin-defined participant count. The count
+    // drives the first-round pairings and the automatic BYE placement.
     if (
       effectiveMode === 'KNOCKOUT' &&
-      (!Number.isFinite(tournamentForm.firstRoundMatches) || tournamentForm.firstRoundMatches < 1)
+      (!Number.isFinite(tournamentForm.knockoutParticipants) ||
+        tournamentForm.knockoutParticipants < 2)
     ) {
-      setStatusMessage('Please enter the number of first-round matches for the knockout draw.');
+      setStatusMessage('Please enter at least 2 participants for the knockout draw.');
       return;
     }
 
@@ -943,7 +1175,7 @@ function App() {
     const teamCount = tournamentForm.teamCount;
     const singlesPerDuel = tournamentForm.singlesPerDuel;
     const doublesPerDuel = tournamentForm.doublesPerDuel;
-    const firstRoundMatches = tournamentForm.firstRoundMatches;
+    const knockoutParticipants = tournamentForm.knockoutParticipants;
     // Singles / Doubles: start with an empty bracket (TBD placeholders) and let
     // the admin assign participants directly on the tournament display.
     const participantSeeds: ParticipantSeed[] = [];
@@ -985,7 +1217,7 @@ function App() {
             )
           : effectiveMode === 'KNOCKOUT'
             ? buildKnockoutPlan(
-                firstRoundMatches,
+                knockoutParticipants,
                 [],
                 tournamentForm.matchFormat,
                 tournamentForm.eventType,
@@ -995,6 +1227,7 @@ function App() {
                 tournamentForm.groupCount,
                 tournamentForm.matchFormat,
                 tournamentForm.eventType,
+                tournamentForm.playersPerGroup,
               );
 
       const tournamentPayload: any = {
@@ -1009,6 +1242,8 @@ function App() {
         groupCount: effectiveMode === 'ROUND_ROBIN' ? tournamentForm.groupCount : undefined,
         qualifyPerGroup:
           effectiveMode === 'ROUND_ROBIN' ? tournamentForm.qualifyPerGroup : undefined,
+        playersPerGroup:
+          effectiveMode === 'ROUND_ROBIN' ? tournamentForm.playersPerGroup : undefined,
         bracketSize: effectiveMode === 'KNOCKOUT' ? (plan as any).bracketSize : undefined,
         roundLabels: effectiveMode === 'KNOCKOUT' ? (plan as any).roundLabels : undefined,
         teamCount: effectiveMode === 'TEAM_BATTLE' ? teamCount : undefined,
@@ -1110,7 +1345,8 @@ function App() {
         matchFormat: 'BEST_OF_3',
         groupCount: 2,
         qualifyPerGroup: 2,
-        firstRoundMatches: 4,
+        playersPerGroup: 4,
+        knockoutParticipants: 8,
         teamCount: 2,
         singlesPerDuel: 4,
         doublesPerDuel: 2,
@@ -1772,7 +2008,9 @@ function App() {
               </span>
             ))
           ) : (
-            <span className="set-score-placeholder">{match.score === 'BYE' ? 'BYE' : '—'}</span>
+            // A BYE match has no sets to show — the single "BYE" marker lives
+            // in the bye side's participant name, never in the score strip.
+            <span className="set-score-placeholder">—</span>
           )}
         </div>
       </div>
@@ -2029,7 +2267,8 @@ function App() {
 
   // Participant dropdown inside the standard scoring modal. Singles offers
   // players, doubles offers teams. The select is bound to the current side so
-  // the chosen participant never appears twice in the dropdown.
+  // the chosen participant is re-selectable at any time; the trailing TBD
+  // option clears the side back to an undecided participant.
   function renderStandardModalParticipantSelect(match: Match, side: WinnerSide) {
     const isA = side === 'A';
     const currentName = isA ? match.participantAName : match.participantBName;
@@ -2053,11 +2292,15 @@ function App() {
               setQuickCreate({ matchId: match.id, side, kind: createKind, name: '' });
               return;
             }
+            if (value === '__tbd__') {
+              void updateMatchParticipant(match, side, [], 'TBD');
+              return;
+            }
             if (!value) {
               return;
             }
             const option = options.find((opt) => opt.value === value);
-            void updateMatchParticipant(match, side, value, option?.label ?? 'TBD');
+            void updateMatchParticipant(match, side, [value], option?.label ?? 'TBD');
           }}
         >
           {!currentValue ? <option value="">{currentName || 'Select participant'}</option> : null}
@@ -2066,11 +2309,95 @@ function App() {
               {option.label}
             </option>
           ))}
+          <option value="__tbd__">TBD</option>
           <option value="__create__">
             + Create New {createKind === 'TEAM' ? 'Team' : 'Player'}
           </option>
         </select>
       </label>
+    );
+  }
+
+  // Doubles knockout sides bind two INDEPENDENT players, so this renderer
+  // produces one dropdown per player slot instead of a whole-team select. The
+  // dropdowns mirror the singles participant select exactly: same
+  // inline-participant-select styling, freely re-selectable, and a TBD option
+  // at the end of the player list clears that slot.
+  function renderDoublesModalParticipantSelects(match: Match, side: WinnerSide) {
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+    // A freshly generated knockout match pre-fills each side with the bracket
+    // slot's TournamentEntry id (not a Player id); only ids that resolve to a
+    // real selectable player may occupy a dropdown slot.
+    const validSlotIds = getParticipantEntryIds(match, side).filter((id) =>
+      playerIdToName.has(id),
+    );
+    const slotIds: (string | undefined)[] = [validSlotIds[0], validSlotIds[1]];
+
+    const commitSlot = (slotIndex: number, nextId: string | null) => {
+      const next = [...validSlotIds];
+      if (nextId) {
+        next[slotIndex] = nextId;
+      } else {
+        next.splice(slotIndex, 1);
+      }
+      const ids = next.filter(Boolean);
+      const name = ids.length
+        ? ids.map((id) => playerIdToName.get(id) ?? 'TBD').join(' / ')
+        : 'TBD';
+      void updateMatchParticipant(match, side, ids, name);
+    };
+
+    return (
+      <div className="doubles-lineup-select">
+        {[0, 1].map((slotIndex) => {
+          const slotId = slotIds[slotIndex] ?? '';
+          return (
+            <label
+              className="team-lineup-select"
+              key={`${match.id}-${side}-slot-${slotIndex}`}
+            >
+              <span>Player {slotIndex + 1}</span>
+              <select
+                className="inline-participant-select"
+                value={slotId}
+                disabled={saving || match.status === 'COMPLETED'}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === '__create__') {
+                    setQuickCreate({
+                      matchId: match.id,
+                      side,
+                      kind: 'PLAYER',
+                      name: '',
+                      slotIndex,
+                    });
+                    return;
+                  }
+                  if (value === '__tbd__') {
+                    commitSlot(slotIndex, null);
+                    return;
+                  }
+                  if (!value) {
+                    return;
+                  }
+                  commitSlot(slotIndex, value);
+                }}
+              >
+                {!slotId ? (
+                  <option value="">Player {slotIndex + 1} · TBD</option>
+                ) : null}
+                {manageablePlayers.map((player) => (
+                  <option key={player.id} value={player.id}>
+                    {player.name}
+                  </option>
+                ))}
+                <option value="__tbd__">TBD</option>
+                <option value="__create__">+ Create New Player</option>
+              </select>
+            </label>
+          );
+        })}
+      </div>
     );
   }
 
@@ -2088,6 +2415,39 @@ function App() {
     const matchFormat = (match.matchFormat || 'BEST_OF_3') as MatchFormat;
     const setCount = getBestOf(matchFormat);
     const isConfirmed = match.status === 'COMPLETED';
+    // Round-robin matches reuse this modal in a stripped-down form: the player
+    // info comes straight from the group matches (mirrored by the matrix), so
+    // no participant selects are shown and only Save/Confirm/Clear remain.
+    const isRoundRobin = match.stage === 'GROUP';
+
+    // Display-layer hard block: refuse to open the scoring panel for a match
+    // that violates the round-1-only BYE rule.
+    if (!isRoundRobin && hasIllegalKnockoutBye(match)) {
+      return (
+        <div className="scoring-modal-overlay" onClick={() => setScoringMatch(null)}>
+          <div className="scoring-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="scoring-modal-head">
+              <div className="scoring-modal-title">
+                <strong>Match Scoring</strong>
+                <span className="scoring-modal-type">Invalid bracket</span>
+              </div>
+              <button
+                className="scoring-modal-close"
+                type="button"
+                aria-label="Close scoring dialog"
+                onClick={() => setScoringMatch(null)}
+              >
+                ×
+              </button>
+            </div>
+            <p className="bye-rule-note">
+              BYE is not allowed after round 1. This match cannot be scored.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
     const isEditingThisMatch = matchForm.matchId === match.id;
     const aScores = isEditingThisMatch
       ? matchForm.participantAScores
@@ -2135,41 +2495,82 @@ function App() {
                   </div>
                   {isByeSide ? (
                     <span className="bye-badge">BYE</span>
+                  ) : isRoundRobin ? (
+                    <div className="scoring-side-participant">
+                      <span className="participant-name">
+                        {isA ? match.participantAName : match.participantBName || 'TBD'}
+                      </span>
+                    </div>
                   ) : (
                     <>
-                      {renderStandardModalParticipantSelect(match, side)}
-                      <div className="editable-score-inputs">
-                        {Array.from({ length: setCount }, (_, index) => (
-                          <input
-                            key={`${match.id}-${side}-${index}`}
-                            className="inline-score-input"
-                            type="number"
-                            min={0}
-                            value={scores[index] ?? ''}
-                            disabled={saving || isConfirmed || isByeMatch}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              const key = isA ? 'participantAScores' : 'participantBScores';
-                              const next = [...scores];
-                              next[index] = value;
-                              setMatchForm((current) => ({
-                                ...current,
-                                matchId: match.id,
-                                [key]: next,
-                              }));
-                            }}
-                          />
-                        ))}
-                      </div>
+                      {match.matchCategory === 'STANDARD_DOUBLES' &&
+                      match.stage === 'KNOCKOUT' ? (
+                        renderDoublesModalParticipantSelects(match, side)
+                      ) : (
+                        renderStandardModalParticipantSelect(match, side)
+                      )}
                     </>
                   )}
+                  {!isByeSide ? (
+                    <div className="editable-score-inputs">
+                      {Array.from({ length: setCount }, (_, index) => (
+                        <input
+                          key={`${match.id}-${side}-${index}`}
+                          className="inline-score-input"
+                          type="number"
+                          min={0}
+                          value={scores[index] ?? ''}
+                          disabled={saving || isConfirmed || isByeMatch}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            const key = isA ? 'participantAScores' : 'participantBScores';
+                            const next = [...scores];
+                            next[index] = value;
+                            setMatchForm((current) => ({
+                              ...current,
+                              matchId: match.id,
+                              [key]: next,
+                            }));
+                          }}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
           </div>
 
           <div className="scoring-modal-actions">
-            {isByeMatch ? (
+            {isRoundRobin ? (
+              <>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={saving || isConfirmed}
+                  onClick={() => void saveInlineScore(match, aScores, bScores)}
+                >
+                  Save Score
+                </button>
+                <button
+                  className="confirm-button"
+                  type="button"
+                  disabled={saving || isConfirmed || !scoreIsValid}
+                  onClick={() => void confirmMatchEnd(match, aScores, bScores)}
+                  title="Finalize the match and lock the score"
+                >
+                  ✓ Confirm Match End
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void clearMatchScore(match.id)}
+                >
+                  Clear
+                </button>
+              </>
+            ) : isByeMatch ? (
               <span className="bye-note">
                 {isConfirmed
                   ? 'BYE — participant automatically advanced to the next round.'
@@ -2216,7 +2617,7 @@ function App() {
             )}
           </div>
 
-          {quickCreate && quickCreate.matchId === match.id ? (
+          {!isRoundRobin && quickCreate && quickCreate.matchId === match.id ? (
             <div className="quick-create-form">
               <strong>
                 Create New {quickCreate.kind === 'TEAM' ? 'Team' : 'Player'} for{' '}
@@ -2259,12 +2660,286 @@ function App() {
   }
 
   // ── In-place bracket editing (admin) ─────────────────────────────────────
-  // Update a match's participant on a given side. Supports singles (single
-  // entry) and doubles (array of entries). Team battle uses the lineup editor.
+  // Update a match's participant on a given side. Supports singles (a single
+  // entry) and doubles (an array of two independent player entries). Team
+  // battle uses the lineup editor instead.
+  //
+  // Round-robin group matches are pre-wired to slot entries (TBD placeholders)
+  // at creation. When a participant is assigned to a match side, the slot
+  // entry mirrors the assignment so the group standings and matrix resolve;
+  // clearing a side reverts its slot entry back to TBD. Best-effort: the match
+  // side itself is already persisted before this sync runs.
+  async function syncRoundRobinSlotEntry(
+    tournamentId: string,
+    entryId: string,
+    boundIds: string[],
+    boundName: string,
+  ) {
+    const entry = entries.find(
+      (item) => item.id === entryId && item.tournamentId === tournamentId,
+    );
+    if (!entry) {
+      return;
+    }
+    const boundId = boundIds.length === 1 ? boundIds[0] : null;
+    const boundIsTeam = Boolean(boundId && manageableTeams.some((team) => team.id === boundId));
+    const payload: any = {
+      id: entryId,
+      entryName: boundName || 'TBD',
+      playerId: boundId && !boundIsTeam ? boundId : null,
+      teamId: boundId && boundIsTeam ? boundId : null,
+    };
+    try {
+      const { data } = await client.models.TournamentEntry.update(payload as any, ownerAuthMode());
+      setEntries((current) =>
+        upsertLocalItem(current, (data ?? { ...entry, ...payload }) as TournamentEntry),
+      );
+    } catch {
+      // Best-effort sync; the match side itself was already persisted.
+    }
+  }
+
+  // Current player ids bound to a round-robin slot entry. Every group match
+  // wired to the slot carries the same pair, so reading the first match keeps
+  // the roster modal / entry dropdowns in sync without extra bookkeeping.
+  function getRoundRobinSlotPlayerIds(tournamentId: string, entryId: string): string[] {
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+    const boundMatch = matches.find(
+      (match) =>
+        match.tournamentId === tournamentId &&
+        (match.participantAEntryId === entryId || match.participantBEntryId === entryId),
+    );
+    const ids = boundMatch
+      ? getParticipantEntryIds(
+          boundMatch,
+          boundMatch.participantAEntryId === entryId ? 'A' : 'B',
+        )
+      : [];
+    return ids.filter((id) => playerIdToName.has(id));
+  }
+
+  // Round-robin entry assignment: bind a player (singles) or a two-player pair
+  // (doubles) to a slot entry and propagate the same side to every group match
+  // wired to that slot. The slot entry mirrors the display name so standings
+  // rows and matrix headers resolve; the matches carry the concrete player ids
+  // so the scoring modal and matrix pair up exactly. Clearing the slot reverts
+  // everything back to TBD.
+  async function assignRoundRobinSlot(
+    tournamentId: string,
+    entryId: string,
+    boundIds: string[],
+    boundName: string,
+  ) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const nextIds = boundIds.filter(Boolean);
+    const displayName = nextIds.length ? boundName : 'TBD';
+
+    const slotMatches = matches.filter(
+      (match) =>
+        match.tournamentId === tournamentId &&
+        (match.participantAEntryId === entryId || match.participantBEntryId === entryId),
+    );
+
+    setSaving(true);
+    setStatusMessage('');
+    try {
+      // Mirror the assignment into the slot entry (standings / matrix headers).
+      await syncRoundRobinSlotEntry(tournamentId, entryId, nextIds, displayName);
+
+      // Propagate to every group match side wired to this slot.
+      await Promise.all(
+        slotMatches.map(async (match) => {
+          const isA = match.participantAEntryId === entryId;
+          const payload: any = {
+            id: match.id,
+            ...(isA
+              ? {
+                  participantAEntryIds: nextIds.length ? nextIds : null,
+                  participantAName: displayName,
+                }
+              : {
+                  participantBEntryIds: nextIds.length ? nextIds : null,
+                  participantBName: displayName,
+                }),
+          };
+          const { data } = await client.models.Match.update(payload as any, ownerAuthMode());
+          setMatches((current) =>
+            mergeMatchState(current, match.id, payload, data as Match | null),
+          );
+        }),
+      );
+
+      setStatusMessage(
+        `Entry "${displayName}" synced to ${slotMatches.length} round-robin match${slotMatches.length === 1 ? '' : 'es'}.`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to assign the entry.';
+      setStatusMessage(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Single-player slot dropdown rendered in the Entry column of a round-robin
+  // standings table. The select is freely re-selectable and a trailing TBD
+  // option clears the slot back to an undecided entry.
+  function renderRoundRobinSlotSelect(
+    tournamentId: string,
+    entryId: string,
+    currentName: string | null | undefined,
+  ) {
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+    const boundIds = getRoundRobinSlotPlayerIds(tournamentId, entryId);
+    const currentValue = boundIds[0] && playerIdToName.has(boundIds[0]) ? boundIds[0] : '';
+
+    return (
+      <select
+        className="inline-participant-select rr-slot-select"
+        value={currentValue}
+        disabled={saving}
+        onChange={(event) => {
+          const value = event.target.value;
+          if (value === '__tbd__') {
+            void assignRoundRobinSlot(tournamentId, entryId, [], 'TBD');
+            return;
+          }
+          if (!value) {
+            return;
+          }
+          const option = manageablePlayers.find((player) => player.id === value);
+          void assignRoundRobinSlot(tournamentId, entryId, [value], option?.name ?? 'TBD');
+        }}
+      >
+        {!currentValue ? <option value="">{currentName || 'TBD'}</option> : null}
+        {manageablePlayers.map((player) => (
+          <option key={player.id} value={player.id}>
+            {player.name}
+          </option>
+        ))}
+        <option value="__tbd__">TBD</option>
+      </select>
+    );
+  }
+
+  // Round-robin doubles roster popup. One row per slot of the selected group,
+  // each row offering two independent player dropdowns (Player 1 / Player 2).
+  // Selections update the slot and all its matches in real time.
+  function renderRoundRobinRosterModal() {
+    if (!rrRoster || !isAuthenticated) {
+      return null;
+    }
+    const tournament = tournaments.find((item) => item.id === rrRoster.tournamentId);
+    if (!tournament) {
+      return null;
+    }
+    const groupEntries = entries
+      .filter(
+        (entry) =>
+          entry.tournamentId === rrRoster.tournamentId && entry.groupName === rrRoster.groupName,
+      )
+      .sort((left, right) => (left.slotNumber ?? 0) - (right.slotNumber ?? 0));
+    const playerIdToName = new Map(manageablePlayers.map((player) => [player.id, player.name]));
+
+    const commitRow = (entryId: string, nextIds: (string | undefined)[]) => {
+      const ids = nextIds.filter(Boolean) as string[];
+      const name = ids.length
+        ? ids.map((id) => playerIdToName.get(id) ?? 'TBD').join(' / ')
+        : 'TBD';
+      void assignRoundRobinSlot(rrRoster.tournamentId, entryId, ids, name);
+    };
+
+    return (
+      <div className="scoring-modal-overlay" onClick={() => setRrRoster(null)}>
+        <div className="scoring-modal" onClick={(event) => event.stopPropagation()}>
+          <div className="scoring-modal-head">
+            <div className="scoring-modal-title">
+              <strong>Group {rrRoster.groupName} Entries</strong>
+              <span className="scoring-modal-type">Doubles</span>
+            </div>
+            <button
+              className="scoring-modal-close"
+              type="button"
+              aria-label="Close roster dialog"
+              onClick={() => setRrRoster(null)}
+            >
+              ×
+            </button>
+          </div>
+          <div className="rr-roster-list">
+            {groupEntries.map((entry) => {
+              const boundIds = getRoundRobinSlotPlayerIds(rrRoster.tournamentId, entry.id);
+              const slotIds: (string | undefined)[] = [boundIds[0], boundIds[1]];
+              return (
+                <div className="rr-roster-row" key={entry.id}>
+                  <span className="rr-roster-row-label">
+                    Entry {entry.slotNumber ?? ''}
+                  </span>
+                  {[0, 1].map((slotIndex) => {
+                    const slotId = slotIds[slotIndex] ?? '';
+                    return (
+                      <label
+                        className="team-lineup-select"
+                        key={`${entry.id}-${slotIndex}`}
+                      >
+                        <span>Player {slotIndex + 1}</span>
+                        <select
+                          className="inline-participant-select"
+                          value={slotId}
+                          disabled={saving}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            if (value === '__tbd__') {
+                              const next = [...slotIds];
+                              next[slotIndex] = undefined;
+                              commitRow(entry.id, next);
+                              return;
+                            }
+                            if (!value) {
+                              return;
+                            }
+                            const next = [...slotIds];
+                            next[slotIndex] = value;
+                            commitRow(entry.id, next);
+                          }}
+                        >
+                          {!slotId ? (
+                            <option value="">Player {slotIndex + 1} · TBD</option>
+                          ) : null}
+                          {manageablePlayers.map((player) => (
+                            <option key={player.id} value={player.id}>
+                              {player.name}
+                            </option>
+                          ))}
+                          <option value="__tbd__">TBD</option>
+                        </select>
+                      </label>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+          <div className="scoring-modal-actions">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={saving}
+              onClick={() => setRrRoster(null)}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   async function updateMatchParticipant(
     match: Match,
     side: WinnerSide,
-    entryId: string,
+    entryIds: string[],
     entryName: string,
   ) {
     if (!isAuthenticated) {
@@ -2272,19 +2947,36 @@ function App() {
     }
     const isA = side === 'A';
 
-    // For both singles and doubles, replace the side with the selected entry.
-    const nextIds: string[] = [entryId];
+    // Replace the whole side with the selected entries (1 player for singles,
+    // the full 2-player pair for doubles).
+    const nextIds = entryIds.filter(Boolean);
+
+    // Round robin: every group match side is wired to a slot entry created at
+    // tournament build time. The slot entry id stays in participantXEntryId so
+    // the group standings and matrix keep resolving the same slot; the picked
+    // participant ids live in participantXEntryIds and the slot entry mirrors
+    // the current name so standings rows show the actual player.
+    const isRoundRobin = match.stage === 'GROUP';
+    const slotEntryId = isA ? match.participantAEntryId : match.participantBEntryId;
 
     const updatePayload: any = {
       id: match.id,
       ...(isA
         ? {
-            participantAEntryId: nextIds.length === 1 ? nextIds[0] : null,
+            participantAEntryId: isRoundRobin
+              ? (slotEntryId ?? null)
+              : nextIds.length === 1
+                ? nextIds[0]
+                : null,
             participantAEntryIds: nextIds.length ? nextIds : null,
             participantAName: entryName,
           }
         : {
-            participantBEntryId: nextIds.length === 1 ? nextIds[0] : null,
+            participantBEntryId: isRoundRobin
+              ? (slotEntryId ?? null)
+              : nextIds.length === 1
+                ? nextIds[0]
+                : null,
             participantBEntryIds: nextIds.length ? nextIds : null,
             participantBName: entryName,
           }),
@@ -2296,17 +2988,32 @@ function App() {
       const { data } = await client.models.Match.update(updatePayload as any, ownerAuthMode());
       setMatches((current) => mergeMatchState(current, match.id, updatePayload, data as Match | null));
 
+      // Keep the round-robin slot entry in sync (standings / matrix resolve).
+      if (isRoundRobin && slotEntryId) {
+        await syncRoundRobinSlotEntry(match.tournamentId, slotEntryId, nextIds, entryName);
+      }
+
       // BYE auto-advance: in a knockout draw, when the participant on the
       // playing side of a BYE match is assigned, they automatically win the
-      // match and advance to the next round. No score entry is needed.
-      if (match.stage === 'KNOCKOUT') {
+      // match and advance to the next round. No score entry is needed. BYEs
+      // are only allowed in round 1, so this auto-advance is hard-gated to
+      // round 1 — a later-round BYE can never silently promote a participant.
+      // A doubles side must be a complete pair before it can auto-advance.
+      if (match.stage === 'KNOCKOUT' && match.roundNumber === 1) {
         const otherSideName = isA ? match.participantBName : match.participantAName;
         if (otherSideName === 'BYE') {
+          if (match.matchCategory === 'STANDARD_DOUBLES' && nextIds.length < 2) {
+            setStatusMessage(
+              'Both doubles players are required before the BYE auto-advance.',
+            );
+            return;
+          }
           const advancePayload: any = {
             id: match.id,
             status: 'COMPLETED',
             winnerSide: isA ? 'A' : 'B',
-            winnerEntryId: entryId,
+            winnerEntryId: nextIds.length === 1 ? nextIds[0] : null,
+            winnerEntryIds: nextIds.length ? nextIds : null,
             score: 'BYE',
             completedAt: new Date().toISOString(),
           };
@@ -2324,7 +3031,7 @@ function App() {
 
           const nextMatches = await cascadeKnockoutUpdate(
             match.id,
-            { winnerEntryIds: [entryId], winnerName: entryName },
+            { winnerEntryIds: nextIds, winnerName: entryName },
             withAdvance,
           );
           setMatches(nextMatches);
@@ -2343,221 +3050,24 @@ function App() {
     }
   }
 
-  // Render a participant dropdown for in-place editing.
-  function renderEditableParticipantSelect(
-    match: Match,
-    side: WinnerSide,
-    tournament: Tournament,
-  ) {
-    const isA = side === 'A';
-    const currentName = isA ? match.participantAName : match.participantBName;
-
-    // For singles, offer players; for doubles, offer teams.
-    const options =
-      tournament.eventType === 'DOUBLES'
-        ? manageableTeams.map((team) => ({ value: team.id, label: team.name }))
-        : manageablePlayers.map((player) => ({ value: player.id, label: player.name }));
-
-    const createKind: 'PLAYER' | 'TEAM' =
-      tournament.eventType === 'DOUBLES' ? 'TEAM' : 'PLAYER';
-
-    // A BYE side is not a selectable participant: show a prominent BYE badge.
-    if (currentName === 'BYE') {
-      return <span className="bye-badge">BYE</span>;
-    }
-
-    // Bind the select to the current participant so the dropdown never shows
-    // a duplicate of the selected entry (placeholder + real option).
-    const currentValue = options.find((option) => option.label === currentName)?.value ?? '';
-
-    return (
-      <select
-        className="inline-participant-select"
-        value={currentValue}
-        onChange={(event) => {
-          const value = event.target.value;
-          if (value === '__create__') {
-            setQuickCreate({
-              matchId: match.id,
-              side,
-              kind: createKind,
-              name: '',
-            });
-            return;
-          }
-          if (!value) {
-            return;
-          }
-          const option = options.find((opt) => opt.value === value);
-          void updateMatchParticipant(match, side, value, option?.label ?? 'TBD');
-        }}
-        disabled={saving || match.status === 'COMPLETED'}
-      >
-        {!currentValue ? <option value="">{currentName || 'TBD'}</option> : null}
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-        <option value="__create__">
-          + Create New {createKind === 'TEAM' ? 'Team' : 'Player'}
-        </option>
-      </select>
-    );
-  }
-
-  // Render an editable match box with participant dropdowns and score inputs.
-  function renderEditableMatchBox(match: Match, tournament: Tournament) {
-    const matchFormat = (match.matchFormat || tournament.matchFormat || 'BEST_OF_3') as MatchFormat;
-    const setCount = getBestOf(matchFormat);
-    const isEditingThisMatch = matchForm.matchId === match.id;
-    const isConfirmed = match.status === 'COMPLETED';
-    const aScores = isEditingThisMatch
-      ? matchForm.participantAScores
-      : (match.participantAScores ?? []).map(String);
-    const bScores = isEditingThisMatch
-      ? matchForm.participantBScores
-      : (match.participantBScores ?? []).map(String);
-    const scoreIsValid = isMatchScoreValid(aScores, bScores, matchFormat);
-    const isByeMatch = match.score === 'BYE';
-    const isByeSideA = match.participantAName === 'BYE';
-    const isByeSideB = match.participantBName === 'BYE';
-
-    return (
-      <div className="match-box editable-match-box" key={match.id}>
-        <div className="editable-match-head">
-          <span>{match.roundLabel}</span>
-          <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
-            {getMatchStatusLabel(match.status)}
-          </span>
-        </div>
-        {(['A', 'B'] as WinnerSide[]).map((side) => {
-          const isA = side === 'A';
-          const scores = isA ? aScores : bScores;
-          const isByeSide = isA ? isByeSideA : isByeSideB;
-          return (
-            <div className="editable-slot" key={side}>
-              {renderEditableParticipantSelect(match, side, tournament)}
-              {!isByeSide ? (
-                <div className="editable-score-inputs">
-                  {Array.from({ length: setCount }, (_, index) => (
-                    <input
-                      key={`${match.id}-${side}-${index}`}
-                      className="inline-score-input"
-                      type="number"
-                      min={0}
-                      value={scores[index] ?? ''}
-                      disabled={saving || isConfirmed || isByeMatch}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        const key = isA ? 'participantAScores' : 'participantBScores';
-                        const next = [...scores];
-                        next[index] = value;
-                        setMatchForm((current) => ({
-                          ...current,
-                          matchId: match.id,
-                          [key]: next,
-                        }));
-                      }}
-                    />
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-        <div className="editable-match-actions">
-          {isByeMatch ? (
-            <span className="bye-note">
-              {isConfirmed
-                ? 'BYE — participant automatically advanced to the next round.'
-                : 'BYE — assign the participant on the playing side to advance them automatically.'}
-            </span>
-          ) : isConfirmed ? (
-            <button
-              className="secondary-button small"
-              type="button"
-              disabled={saving}
-              onClick={() => void unlockMatch(match)}
-              title="Reopen the match to correct participants or the score"
-            >
-              🔓 Unlock
-            </button>
-          ) : (
-            <>
-              <button
-                className="primary-button small"
-                type="button"
-                disabled={saving}
-                onClick={() => void saveInlineScore(match, aScores, bScores)}
-              >
-                Save Score
-              </button>
-              <button
-                className="confirm-button small"
-                type="button"
-                disabled={saving || !scoreIsValid}
-                onClick={() => void confirmMatchEnd(match, aScores, bScores)}
-                title="Finalize the match and lock the score"
-              >
-                ✓ Confirm Match End
-              </button>
-              <button
-                className="secondary-button small"
-                type="button"
-                disabled={saving}
-                onClick={() => void clearMatchScore(match.id)}
-              >
-                Clear
-              </button>
-            </>
-          )}
-        </div>
-        {quickCreate && quickCreate.matchId === match.id ? (
-          <div className="quick-create-form">
-            <strong>
-              Create New {quickCreate.kind === 'TEAM' ? 'Team' : 'Player'} for{' '}
-              {quickCreate.side === 'A' ? 'Side A' : 'Side B'}
-            </strong>
-            <input
-              className="inline-score-input"
-              type="text"
-              placeholder={quickCreate.kind === 'TEAM' ? 'Team / club name' : 'Player name'}
-              value={quickCreate.name}
-              onChange={(event) =>
-                setQuickCreate((current) =>
-                  current ? { ...current, name: event.target.value } : current,
-                )
-              }
-            />
-            <div className="editable-match-actions">
-              <button
-                className="primary-button small"
-                type="button"
-                disabled={saving}
-                onClick={() => void handleQuickCreate()}
-              >
-                Create
-              </button>
-              <button
-                className="secondary-button small"
-                type="button"
-                disabled={saving}
-                onClick={() => setQuickCreate(null)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </div>
-    );
-  }
-
   // Compact, click-to-score bracket row for Singles/Doubles knockout draws.
   // The bracket only shows matchup info; the scoring panel opens in a modal
   // when the admin clicks the row (same interaction as Team Battle duels).
   function renderStandardMatchRow(match: Match) {
+    // Display-layer hard block: a BYE after round 1 violates the bracket rule,
+    // so the row renders a flagged warning box instead of a clickable match.
+    if (hasIllegalKnockoutBye(match)) {
+      return (
+        <div className="match-box bye-rule-violation" key={match.id}>
+          <div className="standard-match-head">
+            <span className="standard-match-round">{match.roundLabel}</span>
+            <span className="status-pill status-invalid">Invalid</span>
+          </div>
+          <p className="bye-rule-note">BYE is not allowed after round 1.</p>
+        </div>
+      );
+    }
+
     const isByeMatch = match.score === 'BYE';
 
     return (
@@ -2570,7 +3080,6 @@ function App() {
         title="Open the scoring panel for this match"
       >
         <div className="standard-match-head">
-          <span className="standard-match-round">{match.roundLabel}</span>
           <span className={`status-pill status-${String(match.status).toLowerCase()}`}>
             {getMatchStatusLabel(match.status)}
           </span>
@@ -2601,10 +3110,38 @@ function App() {
           );
         })}
         <div className="match-foot">
-          <span>{isByeMatch ? 'Automatic advance by BYE' : match.score || 'Score pending'}</span>
-          <span className="standard-match-hint">Click to score</span>
+          <span className="standard-match-hint">
+            {isByeMatch ? 'Automatic advance' : match.score ? '✓ scored' : '✎ score'}
+          </span>
         </div>
       </button>
+    );
+  }
+
+  // Render a single knockout match card for the symmetric bracket. Authenticated
+  // users get the clickable scoring row; visitors get a read-only card.
+  function renderBracketMatchCard(match: Match, finalMatch: Match | undefined) {
+    if (isAuthenticated) {
+      return renderStandardMatchRow(match);
+    }
+    if (hasIllegalKnockoutBye(match)) {
+      return (
+        <div className="match-box bye-rule-violation" key={match.id}>
+          <p className="bye-rule-note">BYE is not allowed after round 1.</p>
+        </div>
+      );
+    }
+    return (
+      <div
+        className={`match-box ${match.score === 'BYE' ? 'bye-match-row' : ''}`}
+        key={match.id}
+      >
+        {renderParticipantRow(match, 'A', finalMatch)}
+        {renderParticipantRow(match, 'B', finalMatch)}
+        <div className="match-foot">
+          <span>{match.score === 'BYE' ? 'Automatic advance' : match.score || 'Score pending'}</span>
+        </div>
+      </div>
     );
   }
 
@@ -2883,7 +3420,25 @@ function App() {
 
       const match = matches.find((item) => item.id === quickCreate.matchId);
       if (match) {
-        await updateMatchParticipant(match, quickCreate.side, createdId, createdName);
+        // A doubles knockout slot ("+ Create New" inside a Player 1 / Player 2
+        // dropdown) replaces exactly that slot instead of the whole side.
+        if (quickCreate.slotIndex !== undefined) {
+          const playerIdToName = new Map(
+            manageablePlayers.map((player) => [player.id, player.name]),
+          );
+          const validSlotIds = getParticipantEntryIds(match, quickCreate.side).filter((id) =>
+            playerIdToName.has(id),
+          );
+          const next = [...validSlotIds];
+          next[quickCreate.slotIndex] = createdId;
+          const ids = next.filter(Boolean);
+          const name = ids.length
+            ? ids.map((id) => playerIdToName.get(id) ?? createdName).join(' / ')
+            : createdName;
+          await updateMatchParticipant(match, quickCreate.side, ids, name);
+        } else {
+          await updateMatchParticipant(match, quickCreate.side, [createdId], createdName);
+        }
       }
       setQuickCreate(null);
       setStatusMessage(`${quickCreate.kind === 'PLAYER' ? 'Player' : 'Team'} created and assigned.`);
@@ -3050,109 +3605,129 @@ function App() {
                   </div>
 
                   {tournament.mode === 'KNOCKOUT' ? (
-                    <div className="bracket-rounds">
-                      {groupKnockoutRounds(tournamentMatches).map(([round, roundMatches]) => (
-                        <div className="round-column" key={`${tournament.id}-${round}`}>
-                          <h4>{roundMatches[0]?.roundLabel ?? `Round ${round}`}</h4>
-                          {roundMatches.map((match) =>
-                            isAuthenticated ? (
-                              renderStandardMatchRow(match)
-                            ) : (
-                              <div className="match-box" key={match.id}>
-                                {renderParticipantRow(match, 'A', finalMatch)}
-                                {renderParticipantRow(match, 'B', finalMatch)}
-                                <div className="match-foot">
-                                  <span>{match.score === 'BYE' ? 'Automatic advance by BYE' : match.score || 'Score pending'}</span>
-                                </div>
-                              </div>
-                            ),
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                    <KnockoutBracket
+                      matches={tournamentMatches}
+                      renderCard={(match, final) => renderBracketMatchCard(match, final)}
+                    />
                   ) : null}
 
                   {tournament.mode === 'ROUND_ROBIN' ? (
                     <div className="group-layout">
-                      {standings.map((group) => (
-                        <section className="group-card" key={`${tournament.id}-${group.groupName}`}>
-                          <div className="group-head">
-                            <h4>Group {group.groupName}</h4>
-                            <span>Top {tournament.qualifyPerGroup ?? 2} advance</span>
-                          </div>
-                          <div className="table-wrap">
-                            <table>
-                              <thead>
-                                <tr>
-                                  <th>Entry</th>
-                                  <th>Points</th>
-                                  <th>Wins</th>
-                                  <th>Games Won</th>
-                                  <th>Net Games</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {group.standings.map((row, index) => (
-                                  <tr
-                                    key={row.entryId}
-                                    className={index < (tournament.qualifyPerGroup ?? 2) ? 'qualified' : ''}
-                                  >
-                                    <td>{row.entryName}</td>
-                                    <td>{row.points}</td>
-                                    <td>{row.wins}</td>
-                                    <td>{row.gamesWon}</td>
-                                    <td>{row.gamesWon - row.gamesLost}</td>
+                      {standings.map((group) => {
+                        const matrix = formatRoundRobinMatrix(
+                          tournamentEntries as any[],
+                          tournamentMatches as any[],
+                          group.groupName,
+                        );
+                        const isDoubles = tournament.eventType === 'DOUBLES';
+                        return (
+                          <section className="group-card" key={`${tournament.id}-${group.groupName}`}>
+                            <div className="group-head">
+                              <h4>Group {group.groupName}</h4>
+                              <span>Top {tournament.qualifyPerGroup ?? 2} advance</span>
+                            </div>
+                            <div className="table-wrap">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    <th>Entry</th>
+                                    <th>Points</th>
+                                    <th>Wins</th>
+                                    <th>Games Won</th>
+                                    <th>Net Games</th>
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                          <div className="table-wrap">
-                            <table className="matrix-table">
-                              <thead>
-                                <tr>
-                                  <th>Round Robin Matrix</th>
-                                  {formatRoundRobinMatrix(
-                                    tournamentEntries as any[],
-                                    tournamentMatches as any[],
-                                    group.groupName,
-                                  ).map((item) => (
-                                    <th key={`${group.groupName}-${item.entry.id}`}>{item.entry.entryName}</th>
+                                </thead>
+                                <tbody>
+                                  {group.standings.map((row, index) => (
+                                    <tr
+                                      key={row.entryId}
+                                      className={index < (tournament.qualifyPerGroup ?? 2) ? 'qualified' : ''}
+                                    >
+                                      <td>
+                                        {isAuthenticated ? (
+                                          isDoubles ? (
+                                            <button
+                                              className="rr-entry-button"
+                                              type="button"
+                                              disabled={saving}
+                                              title="Edit the two players of this entry"
+                                              onClick={() =>
+                                                setRrRoster({
+                                                  tournamentId: tournament.id,
+                                                  groupName: group.groupName,
+                                                })
+                                              }
+                                            >
+                                              {row.entryName || 'TBD'}
+                                            </button>
+                                          ) : (
+                                            renderRoundRobinSlotSelect(
+                                              tournament.id,
+                                              row.entryId,
+                                              row.entryName,
+                                            )
+                                          )
+                                        ) : (
+                                          row.entryName
+                                        )}
+                                      </td>
+                                      <td>{row.points}</td>
+                                      <td>{row.wins}</td>
+                                      <td>{row.gamesWon}</td>
+                                      <td>{row.gamesWon - row.gamesLost}</td>
+                                    </tr>
                                   ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {formatRoundRobinMatrix(
-                                  tournamentEntries as any[],
-                                  tournamentMatches as any[],
-                                  group.groupName,
-                                ).map((row) => (
-                                  <tr key={row.entry.id}>
-                                    <td>{row.entry.entryName}</td>
-                                    {row.cells.map((cell, index) => (
-                                      <td key={`${row.entry.id}-${index}`}>{cell}</td>
+                                </tbody>
+                              </table>
+                            </div>
+                            <div className="table-wrap">
+                              <table className="matrix-table">
+                                <thead>
+                                  <tr>
+                                    <th>Round Robin Matrix</th>
+                                    {matrix.map((item) => (
+                                      <th key={`${group.groupName}-${item.entry.id}`}>{item.entry.entryName}</th>
                                     ))}
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </section>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  {tournament.mode === 'ROUND_ROBIN' && isAuthenticated ? (
-                    <div className="display-match-editor">
-                      <div className="display-editor-head">
-                        <h4>Match Scoring</h4>
-                        <span className="editor-hint">
-                          Select the participants, enter the score and confirm the match end to lock it.
-                        </span>
-                      </div>
-                      <div className="editable-bracket-grid">
-                        {tournamentMatches.map((match) => renderEditableMatchBox(match, tournament))}
-                      </div>
+                                </thead>
+                                <tbody>
+                                  {matrix.map((row) => (
+                                    <tr key={row.entry.id}>
+                                      <td>{row.entry.entryName}</td>
+                                      {row.cells.map((cell, index) => {
+                                        const columnEntry = matrix[index].entry;
+                                        const groupMatch = findGroupMatch(
+                                          tournamentMatches,
+                                          group.groupName,
+                                          row.entry.id,
+                                          columnEntry.id,
+                                        );
+                                        return (
+                                          <td key={`${row.entry.id}-${index}`}>
+                                            {isAuthenticated && groupMatch ? (
+                                              <button
+                                                className="rr-score-cell"
+                                                type="button"
+                                                disabled={saving}
+                                                title="Open the scoring panel for this match"
+                                                onClick={() => openScoringModal(groupMatch)}
+                                              >
+                                                {cell}
+                                              </button>
+                                            ) : (
+                                              cell
+                                            )}
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </section>
+                        );
+                      })}
                     </div>
                   ) : null}
 
@@ -3549,16 +4124,17 @@ function App() {
 
                   {tournamentForm.eventType !== 'TEAM' && tournamentForm.mode === 'KNOCKOUT' ? (
                     <label>
-                      First round matches
+                      Number of participants
                       <input
                         type="number"
-                        min={1}
+                        min={2}
+                        max={64}
                         required
-                        value={tournamentForm.firstRoundMatches}
+                        value={tournamentForm.knockoutParticipants}
                         onChange={(event) =>
                           setTournamentForm((current) => ({
                             ...current,
-                            firstRoundMatches: Number(event.target.value),
+                            knockoutParticipants: Number(event.target.value),
                           }))
                         }
                       />
@@ -3578,6 +4154,21 @@ function App() {
                             setTournamentForm((current) => ({
                               ...current,
                               groupCount: Number(event.target.value),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Participants per group
+                        <input
+                          type="number"
+                          min={2}
+                          max={16}
+                          value={tournamentForm.playersPerGroup}
+                          onChange={(event) =>
+                            setTournamentForm((current) => ({
+                              ...current,
+                              playersPerGroup: Number(event.target.value),
                             }))
                           }
                         />
@@ -3941,6 +4532,7 @@ function App() {
 
       {renderTeamBattleScoringModal()}
       {renderStandardMatchScoringModal()}
+      {renderRoundRobinRosterModal()}
     </div>
   );
 }

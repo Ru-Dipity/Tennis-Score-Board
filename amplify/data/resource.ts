@@ -77,6 +77,7 @@ const schema = a.schema({
       status: a.ref('TournamentStatus').required(),
       groupCount: a.integer(),
       qualifyPerGroup: a.integer(),
+      playersPerGroup: a.integer(),
       bracketSize: a.integer(),
       roundLabels: a.string().array(),
       matchFormat: a.ref('MatchFormat').required(),

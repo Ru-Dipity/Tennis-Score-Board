@@ -241,7 +241,6 @@
 .panel-form h3,
 .panel-info h3,
 .group-card h4,
-.round-column h4,
 .history-list h4,
 .team-summary-card h4 {
   margin: 0;
@@ -361,6 +360,11 @@
   color: #64748b;
 }
 
+.status-invalid {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
 /* ── Event Filter Bar (Tournament Display) ── */
 
 .event-filter-bar {
@@ -400,13 +404,6 @@
   font-weight: 600;
 }
 
-.bracket-rounds {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 14px;
-}
-
-.round-column,
 .history-list,
 .group-layout,
 .admin-console,
@@ -417,6 +414,161 @@
   gap: 16px;
 }
 
+/* ── Standard single-elimination knockout bracket (react-brackets) ──
+   Round columns and card layout are rendered by the react-brackets core
+   component. The advancement tree is drawn by our own SVG layer: every card is
+   measured at runtime and a polyline is anchored exactly from the right-center
+   of the feeder card to the left-center of its successor, so lines can never
+   overlap, pierce or disconnect from the cards. Layer order: connectors at
+   z-index 0, match cards at z-index 10. */
+
+.bracket-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Round navigation pills ── */
+
+.bracket-nav {
+  display: flex;
+  gap: 8px;
+  padding: 4px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bracket-nav-pill {
+  appearance: none;
+  border: 1px solid #dbe6df;
+  background: #ffffff;
+  color: #475569;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 7px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.bracket-nav-pill:hover {
+  border-color: #16a34a;
+  color: #15803d;
+}
+
+.bracket-nav-pill.active {
+  background: linear-gradient(135deg, #0f766e, #10b981);
+  border-color: transparent;
+  color: #ffffff;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.25);
+}
+
+/* ── Scroll container + measured inner area ── */
+
+.bracket-split {
+  padding: 20px;
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Creates the stacking context shared by the connector and card layers. */
+.bracket-inner {
+  position: relative;
+  z-index: 0;
+  width: fit-content;
+  min-width: 100%;
+}
+
+/* ── Round columns: subtle alternating backgrounds ── */
+
+.bracket-round {
+  margin-right: 24px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.6); /* slate-50/60: odd columns */
+}
+
+.bracket-round:last-child {
+  margin-right: 0;
+}
+
+.bracket-round:nth-child(even) {
+  background: #ffffff; /* even columns */
+}
+
+/* SeedsList override: the library lays seeds out as a row-wrapping flex; we
+   switch it to a single vertical column where every seed grows to an equal
+   share of the column height. Because every column spans the same number of
+   seed slots (8/4/2/1), each card lands exactly on the tree midpoint between
+   its two feeder cards — which is what the connector math relies on. */
+.bracket-round > div:last-child {
+  display: flex;
+  flex-flow: column nowrap;
+  justify-content: flex-start;
+  height: 100%;
+}
+
+/* ── Custom match card slot (replaces the library Seed chrome) ── */
+
+.rb-seed {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-width: 230px;
+  min-height: 0;
+}
+
+.rb-seed > .match-box,
+.rb-seed > .standard-match-row {
+  width: 100%;
+  max-width: none;
+}
+
+/* ── Connector layer (below cards, above column backgrounds) ── */
+
+.bracket-connectors {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bracket-connector-path {
+  fill: none;
+  stroke: #cbd5e1; /* slate-300 */
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Round-title pill — reuses the project's green gradient chip. */
+.bracket-col-head {
+  display: block;
+  width: fit-content;
+  margin: 0 auto 10px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #0f766e, #10b981);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .match-box,
 .team-submatch-card {
   display: grid;
@@ -425,6 +577,15 @@
   border-radius: 16px;
   border: 1px solid #d8e4db;
   background: #f8fbf9;
+}
+
+/* Compact knockout bracket cards: tighten padding and slot height so a single
+   match card stays around 80-100px tall. The round label lives in the column
+   header, so the card head only carries the status pill. */
+.standard-match-row {
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 12px;
 }
 
 .slot-row {
@@ -498,10 +659,11 @@
 
 .set-score-cell,
 .set-score-placeholder {
-  min-width: 34px;
-  padding: 7px 8px;
-  border-radius: 10px;
+  min-width: 30px;
+  padding: 4px 6px;
+  border-radius: 8px;
   text-align: center;
+  font-size: 12px;
   font-weight: 700;
   background: #eff6ff;
   color: #1e3a8a;
@@ -867,72 +1029,6 @@ thead th {
   color: #64748b;
 }
 
-.editable-bracket-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 14px;
-}
-
-/* ── Inline match scoring block on the tournament display ── */
-
-.display-match-editor {
-  display: grid;
-  gap: 12px;
-  padding-top: 16px;
-  border-top: 1px dashed #d8e4db;
-}
-
-.display-editor-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-}
-
-.display-editor-head h4 {
-  margin: 0;
-  font-size: 15px;
-  color: #0f172a;
-}
-
-.editor-hint {
-  font-size: 12px;
-  color: #64748b;
-}
-
-.team-submatch-list .editable-match-box {
-  border-color: #cbd8d0;
-}
-
-.team-submatch-list:has(.editable-match-box) {
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-}
-
-.editable-match-box {
-  border-color: #cbd8d0;
-  background: #fbfefc;
-}
-
-.editable-match-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 700;
-  color: #334155;
-}
-
-.editable-slot {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: #ffffff;
-  border: 1px solid #e4ece7;
-}
-
 .inline-participant-select {
   width: 100%;
   padding: 8px 10px;
@@ -972,6 +1068,84 @@ thead th {
   font-size: 13px;
 }
 
+/* ── Round-robin entry & matrix interactions ──
+   The Entry column of a round-robin group hosts the roster controls: a plain
+   dropdown per slot for singles, and a click-to-open button for doubles that
+   launches the two-player roster modal. Matrix cells with a real match open
+   the scoring modal (players come straight from the group matches). */
+
+.rr-entry-button {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #d6e2da;
+  background: #f8fbf9;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rr-entry-button:hover:not(:disabled) {
+  border-color: #16a34a;
+  background: #f0fdf4;
+}
+
+.rr-slot-select {
+  min-width: 0;
+}
+
+.rr-score-cell {
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid #d6e2da;
+  background: #f8fbf9;
+  font-size: 12px;
+  font-weight: 700;
+  color: #15803d;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rr-score-cell:hover:not(:disabled) {
+  border-color: #16a34a;
+  background: #f0fdf4;
+}
+
+.rr-roster-list {
+  display: grid;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.rr-roster-row {
+  display: grid;
+  grid-template-columns: 90px repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #e4ece7;
+  border-radius: 12px;
+  background: #fbfefc;
+}
+
+.rr-roster-row-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.scoring-side-participant {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #e4ece7;
+  background: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
 /* ── BYE badge & note (knockout draws) ── */
 
 .bye-badge {
@@ -1002,6 +1176,17 @@ thead th {
   font-weight: 600;
   line-height: 1.5;
   text-align: left;
+}
+
+/* ── Doubles lineup dropdowns (doubles knockout scoring modal) ──
+   Each side of a doubles knockout match binds two independent players via two
+   dropdowns (Player 1 / Player 2) that share the singles inline select style.
+   On narrow screens the two columns collapse into a single vertical stack. */
+
+.doubles-lineup-select {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 /* ── Compact click-to-score bracket row (Singles / Doubles knockout) ── */
@@ -1036,17 +1221,46 @@ thead th {
   box-shadow: none;
 }
 
+/* Round-1 BYE zones get a thick amber border plus an outer glow so the
+   auto-advance slots are immediately recognisable on the bracket. */
 .bye-match-row {
-  border-color: rgba(245, 158, 11, 0.55);
+  border-color: #f59e0b;
+  border-width: 2px;
   background: #fffbeb;
+  box-shadow:
+    0 0 0 3px rgba(245, 158, 11, 0.18),
+    0 8px 20px rgba(245, 158, 11, 0.12);
+}
+
+/* Illegal BYE rows (a stored BYE in a round after round 1) render as red
+   violation boxes and refuse to open the scoring modal. */
+.bye-rule-violation {
+  border-color: #ef4444;
+  border-width: 2px;
+  background: #fef2f2;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+}
+
+.bye-rule-note {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px dashed #ef4444;
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: left;
 }
 
 .standard-match-head {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   color: #475569;
 }
@@ -1059,9 +1273,9 @@ thead th {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 12px;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 10px;
   background: #ffffff;
   border: 1px solid #e4ece7;
 }
@@ -1069,12 +1283,13 @@ thead th {
 .standard-match-slot .participant-name {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-size: 13px;
 }
 
 .standard-match-hint {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  color: #2563eb;
+  color: #64748b;
   white-space: nowrap;
 }
 
@@ -1832,25 +2047,21 @@ thead th {
     text-align: center;
   }
 
-  .editable-match-box {
-    min-width: 0;
+  .rr-roster-row {
+    grid-template-columns: 1fr;
   }
 
   .editable-score-inputs {
     flex-wrap: wrap;
   }
 
-  .round-column .editable-match-box {
-    min-width: 0;
-  }
-
-  .round-column .standard-match-row {
-    min-width: 0;
-  }
-
   .standard-match-slot {
     flex-wrap: wrap;
     gap: 6px 12px;
+  }
+
+  .doubles-lineup-select {
+    grid-template-columns: 1fr;
   }
 
   .standard-match-slot .set-score-strip {
@@ -1861,7 +2072,42 @@ thead th {
     font-size: 10px;
   }
 
-  .team-submatch-list:has(.editable-match-box) {
+  /* ── Knockout bracket on mobile: the whole bracket scrolls horizontally
+     when it cannot fit the viewport ── */
+
+  .bracket-nav {
+    gap: 6px;
+  }
+
+  .bracket-nav-pill {
+    padding: 6px 12px;
+    font-size: 11px;
+  }
+
+  .bracket-split {
+    padding: 14px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .bracket-round {
+    margin-right: 16px;
+    padding: 8px;
+  }
+
+  .standard-match-row {
+    padding: 6px 10px;
+  }
+
+  .standard-match-slot {
+    padding: 5px 8px;
+  }
+
+  .bye-match-row {
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.16);
+  }
+
+  .team-submatch-list {
     grid-template-columns: 1fr;
   }
 
