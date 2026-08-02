@@ -9,7 +9,7 @@ frontend:
   phases:
     preBuild:
       commands:
-        - npm install
+        - npm ci --legacy-peer-deps || npm install --legacy-peer-deps
     build:
       commands:
         - npm run build
